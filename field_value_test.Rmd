@@ -16,7 +16,7 @@ library(readr)
 library(mgcv)
 
 # Tracking Data
-full_df <- read_csv("~/Documents/Sports Analytics/Personal Projects/NFL Field Value Model/full_data.csv")
+full_df <- read_csv("~/Documents/Football_R/CMSAC--Field Value/full_data.csv")
 ```
 
 # Completed Passes
@@ -175,24 +175,33 @@ completed_passes_sym <- bind_rows(
 # 2. Fit GAM with EP_pre as a Control Term
 # ---------------------------------------------------------
 gam_model <- gam(
-  post_ep ~ te(pass_depth, ball_land_y_std, k = c(10, 10)) + s(expected_points, k = 20), 
+  post_ep ~ te(pass_depth, ball_land_y_std, los_x_std, k = c(8, 8, 8)) + 
+            s(expected_points, k = 15),
+  family = scat(link = "identity"),
   data = completed_passes_sym
 )
 
 summary(gam_model)
+
+gam.check(gam_model)
 
 # ---------------------------------------------------------
 # 3. Create Continuous Surface Grid (0.5yd resolution)
 # ---------------------------------------------------------
 mean_pre_ep <- mean(completed_passes_sym$expected_points, na.rm = TRUE)
 
+target_los <- 80
+
 pred_grid <- expand.grid(
+  los_x_std = target_los,
   pass_depth = seq(-10, 45, by = 0.5),
   ball_land_y_std = seq(1, 52.3, by = 0.5),
   expected_points = mean_pre_ep
-)
+) %>% 
+  # Eliminate impossible passes that land beyond the back of the endzone (110 yards)
+  filter((los_x_std + pass_depth) <= 110)
 
-# Predict Post-Play EP and convert to pure EPA Added
+# Predict updated Post-EP and Expected Points Added (EPA)
 pred_grid$predicted_post_ep <- predict(gam_model, newdata = pred_grid)
 pred_grid$predicted_epa     <- pred_grid$predicted_post_ep - mean_pre_ep
 
@@ -208,7 +217,7 @@ ggplot(pred_grid, aes(x = pass_depth, y = ball_land_y_std)) +
   
   # Line of Scrimmage Line (x = 0)
   geom_vline(xintercept = 0, color = "#4A90E2", linewidth = 1.2, linetype = "dashed") +
-  annotate("text", x = 1, y = 50, label = "Line of Scrimmage", color = "#4A90E2", fontface = "bold", hjust = 0) +
+  annotate("text", x = 1, y = 50, label = paste0("Line of Scrimmage = ", target_los), color = "#4A90E2", fontface = "bold", hjust = 0) +
   
   # Midfield Hash Line (y = 26.65)
   geom_hline(yintercept = 26.65, color = "white", alpha = 0.3, linetype = "dotted") +
@@ -240,4 +249,8 @@ ggplot(pred_grid, aes(x = pass_depth, y = ball_land_y_std)) +
     plot.title = element_text(face = "bold", size = 16)
   )
 
+```
+
+```{r}
+saveRDS(gam_model, file = "gam_field_value_model.rds")
 ```
