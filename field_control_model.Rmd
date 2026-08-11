@@ -223,25 +223,42 @@ library(dplyr)
 library(ggplot2)
 library(gganimate)
 library(tidyr)
+library(future)
+library(furrr)
 
 # =============================================================================
-# PROCESSING
+# 1. SETUP PARALLEL PLAN
 # =============================================================================
+# Use multisession across available local cores (leaving 1 free for your OS)
+num_workers <- max(1, availableCores() - 1)
+plan(multisession, workers = num_workers)
 
-generate_play_pitch_control <- function(tracking_data, target_game, target_play) {
+# Create a temporary directory to store chunked results on disk
+temp_dir <- "play_results_temp"
+if (!dir.exists(temp_dir)) dir.create(temp_dir)
+
+# =============================================================================
+# 2. RESTRUCTURED PROCESSING FUNCTION (Accepts individual play data)
+# =============================================================================
+process_single_play <- function(play_data, output_dir) {
   
-  play_data <- tracking_data %>%
-    filter(game_id == target_game, play_id == target_play, !is.na(nfl_id)) %>%
+  # Extract IDs
+  current_game_id <- play_data$game_id[1]
+  current_play_id <- play_data$play_id[1]
+  
+  play_processed <- play_data %>%
+    filter(!is.na(nfl_id), phase == "pre_pass") %>%
     mutate(
       player_side = tolower(player_side), 
       dir_rad = dir_std * pi / 180, 
       vx = s * sin(dir_rad),
       vy = s * cos(dir_rad)
     ) %>%
-    # FIX: Drop any player-frames with missing standardized coordinates or velocities
     filter(!is.na(x_std) & !is.na(y_std) & !is.na(vx) & !is.na(vy))
   
-  frames <- sort(unique(play_data$frame_id))
+  if (nrow(play_processed) == 0) return(NULL)
+  
+  frames <- sort(unique(play_processed$frame_id))
   grids <- build_nfl_grid(n_cols = 120, n_rows = 54)
   
   xs <- seq(0, 120.0, length.out = 120)
@@ -251,7 +268,7 @@ generate_play_pitch_control <- function(tracking_data, target_game, target_play)
   all_frames_ppcf <- list()
   
   for (f in frames) {
-    frame_data <- play_data %>% filter(frame_id == f)
+    frame_data <- play_processed %>% filter(frame_id == f)
     
     offense_df <- frame_data %>% filter(player_side == "offense")
     defense_df <- frame_data %>% filter(player_side == "defense")
@@ -263,93 +280,104 @@ generate_play_pitch_control <- function(tracking_data, target_game, target_play)
       })
     }
     
-    attacking_players <- to_player_list(offense_df)
-    defending_players <- to_player_list(defense_df)
-    
     qb_row <- offense_df %>% filter(tolower(player_position) == "qb") %>% slice(1)
     if(nrow(qb_row) == 0) qb_row <- offense_df %>% slice(1) 
     
     if (nrow(qb_row) > 0) {
       qb_pos <- list(x = qb_row$x_std, y = qb_row$y_std)
-      
-      # FIX 1: Exclude the QB from the attacking players list so they exert no control
       offense_df <- offense_df %>% filter(nfl_id != qb_row$nfl_id)
     } else {
       qb_pos <- list(x = 60, y = 26.6)
     }
     
-    # Now build the lists (the QB is completely removed from attacking_players)
     attacking_players <- to_player_list(offense_df)
     defending_players <- to_player_list(defense_df)
     
-    results <- nfl_dynamic_pitch_control(
-      attacking_players = attacking_players,
-      defending_players = defending_players,
-      qb_pos = qb_pos,
-      grid_x = grids$x,
-      grid_y = grids$y
-    )
+    # --- FIX 1: Skip frame if one side is entirely missing ---
+    if (length(attacking_players) == 0 || length(defending_players) == 0) {
+      next 
+    }
+    
+    # --- FIX 2: Wrap the calculation in tryCatch to prevent hard crashes ---
+    results <- tryCatch({
+      nfl_dynamic_pitch_control(
+        attacking_players = attacking_players,
+        defending_players = defending_players,
+        qb_pos = qb_pos,
+        grid_x = grids$x,
+        grid_y = grids$y
+      )
+    }, error = function(e) {
+      # If the math fails, return NULL and silently continue
+      return(NULL) 
+    })
+    
+    # Skip to the next frame if an error occurred
+    if (is.null(results)) next
     
     frame_surface <- grid_df_base
     frame_surface$frame_id <- f
     frame_surface$ppcf_att <- as.vector(results$PPCF_att) 
     
-    all_frames_ppcf[[f]] <- frame_surface
+    all_frames_ppcf[[as.character(f)]] <- frame_surface
   }
   
-  return(list(
-    surface_data = bind_rows(all_frames_ppcf),
-    player_data = play_data
-  ))
-}
-
-# --- EXECUTE --- (Replace with your actual dataset, game, and play)
-play_results <- generate_play_pitch_control(full_df, 2023090700, 219)
-
-#---RUN FOR ALL PLAYS---#
-# 1. REMOVE your old filters
-# OLD: play_data <- df %>% filter(game_id == target_game, play_id == target_play)
-
-# 2. Split the data into a list of dataframes, one for each unique game and play
-plays_list <- full_df %>%
-  group_by(game_id, play_id) %>%
-  group_split()
-
-# 3. Initialize empty lists to store your results
-season_results_list <- list()
-surface_data_list <- list()
-
-# 4. Loop through all games and plays
-for(i in seq_along(plays_list)) {
+  if (length(all_frames_ppcf) == 0) return(NA_character_)
   
-  play_data <- plays_list[[i]]
+  surface_data <- bind_rows(all_frames_ppcf)
   
-  # Extract the current IDs so we can tag the surface data later
-  current_game_id <- play_data$game_id[1]
-  current_play_id <- play_data$play_id[1]
-  
-  play_result <- generate_play_pitch_control(full_df, current_game_id, current_play_id)
-  surface_data <- play_result$surface_data
-  
-  
-  # 5. Tag the surface data with the current game_id and play_id
-  # (If surface_data is a dataframe/tibble)
+  # Apply your filtering logic (maximum frame_id per play)
   surface_data <- surface_data %>%
     mutate(
       game_id = current_game_id,
       play_id = current_play_id
-    )
+    ) %>%
+    group_by(game_id, play_id) %>%
+    filter(frame_id == max(frame_id)) %>%
+    ungroup()
   
-  # 6. Store the results in our lists
-  season_results_list[[i]] <- play_result
-  surface_data_list[[i]] <- surface_data
+  # Write directly to disk as a task completes to free up RAM
+  file_name <- file.path(output_dir, paste0("play_", current_game_id, "_", current_play_id, ".rds"))
+  saveRDS(surface_data, file_name)
+  
+  return(file_name)
 }
 
-# 7. Bind everything together into your final objects
-season_results <- bind_rows(season_results_list)
-final_surface_data <- bind_rows(surface_data_list)
+# =============================================================================
+# 3. EXECUTE PARALLEL MAPPING
+# =============================================================================
+# Split data into individual plays list
+plays_list <- full_df %>%
+  group_by(game_id, play_id) %>%
+  group_split()
 
-write.csv(final_surface_data, "field_control_data.csv")
+message(sprintf("Processing %d plays across %d parallel workers...", length(plays_list), num_workers))
+
+# Run in parallel with a progress bar (.progress = TRUE)
+saved_files <- future_map_chr(
+  plays_list, 
+  ~ process_single_play(.x, temp_dir), 
+  .options = furrr_options(seed = TRUE),
+  .progress = TRUE
+)
+
+# Clean up parallel plan and reset to sequential
+plan(sequential)
+
+# =============================================================================
+# 4. LOAD FROM DISK AND COMBINE
+# =============================================================================
+message("Loading chunked files from disk and combining...")
+
+saved_files <- saved_files[!is.na(saved_files)]
+
+all_rds_files <- list.files(temp_dir, pattern = "\\.rds$", full.names = TRUE)
+final_surface_data <- bind_rows(lapply(all_rds_files, readRDS))
+
+# Write final consolidated CSV
+write.csv(final_surface_data, "field_control_data.csv", row.names = FALSE)
+
+message("Done! Final dataset saved to 'field_control_data.csv'.")
 ```
 
 # Plot
@@ -444,4 +472,111 @@ plot_nfl_pitch_control_anim <- function(play_results) {
 anim <- plot_nfl_pitch_control_anim(play_results)
 animate(anim, nframes = max(play_results$player_data$frame_id), fps = 10, width = 800, height = 400)
 
+```
+
+# Check completion % correlation
+```{r}
+play_data <- full_df %>% 
+  select(game_id, play_id, frame_id, ball_land_x_std, ball_land_y_std, pass_result) %>% 
+  distinct()
+
+completion_pct <- final_surface_data %>% 
+  left_join(
+    play_data, 
+    by = c("game_id", "play_id", "frame_id")
+  ) %>% 
+  mutate(distance_sq = (ball_land_x_std - x)^2 + (ball_land_y_std - y)^2) %>% 
+  group_by(game_id, play_id, frame_id) %>% 
+  slice_min(order_by = distance_sq, n = 1, with_ties = FALSE) %>% 
+  ungroup() %>%
+  mutate(distance = sqrt(distance_sq))
+
+# Load necessary libraries
+library(dplyr)
+library(rsample) # For data splitting
+library(caret)   # For confusion matrix and evaluation metrics
+
+# 1. Prepare the Data
+model_data <- completion_pct %>%
+  # Drop missing ppcf_att values
+  filter(!is.na(ppcf_att)) %>%
+  # Create binary outcome: 1 if "C" (Complete), 0 if "I" or "IN"
+  mutate(is_complete = ifelse(pass_result == "C", 1, 0)) %>%
+  select(is_complete, ppcf_att)
+
+# 2. Split Data (Standard 80/20 Split)
+set.seed(42)
+data_split <- initial_split(model_data, prop = 0.80)
+train_data <- training(data_split)
+test_data  <- testing(data_split)
+
+# 3. Calculate Class Weights for the Training Set
+# We use inverse frequency weighting to give more weight to the minority class
+n_total <- nrow(train_data)
+n_pos <- sum(train_data$is_complete == 1)
+n_neg <- n_total - n_pos
+
+weight_pos <- n_total / (2 * n_pos)
+weight_neg <- n_total / (2 * n_neg)
+
+train_data <- train_data %>%
+  mutate(case_weight = ifelse(is_complete == 1, weight_pos, weight_neg))
+
+# 4. Train the Logistic Regression Model
+# Pass the calculated case_weight to the 'weights' argument
+log_model <- glm(
+  is_complete ~ ppcf_att, 
+  data = train_data, 
+  family = binomial(link = "logit"),
+  weights = case_weight
+)
+
+# View model summary
+summary(log_model)
+
+# 5. Predict on Test Set
+test_data$pred_prob <- predict(log_model, newdata = test_data, type = "response")
+
+# 6. Optimize Classification Threshold based on F1-Score
+# Function to calculate F1-score for a given threshold
+calculate_f1 <- function(probabilities, actuals, threshold) {
+  preds <- ifelse(probabilities >= threshold, 1, 0)
+  
+  # Handle edge cases where the model predicts only one class
+  if (sum(preds) == 0) return(0) 
+  
+  precision <- sum(preds == 1 & actuals == 1) / sum(preds == 1)
+  recall <- sum(preds == 1 & actuals == 1) / sum(actuals == 1)
+  
+  if (is.na(precision) || is.na(recall) || (precision + recall) == 0) return(0)
+  
+  f1 <- 2 * (precision * recall) / (precision + recall)
+  return(f1)
+}
+
+# Test thresholds from 0.10 to 0.90 in increments of 0.01
+thresholds <- seq(0.1, 0.9, by = 0.01)
+f1_scores <- sapply(thresholds, function(t) calculate_f1(test_data$pred_prob, test_data$is_complete, t))
+
+# Identify the best threshold
+best_index <- which.max(f1_scores)
+best_threshold <- thresholds[best_index]
+best_f1 <- f1_scores[best_index]
+
+cat("\nOptimization Results:\n")
+cat("Best Threshold:", best_threshold, "\n")
+cat("Maximum F1-Score:", best_f1, "\n\n")
+
+# 7. Apply the Best Threshold and Evaluate
+test_data$pred_class <- ifelse(test_data$pred_prob >= best_threshold, 1, 0)
+
+# Generate final Confusion Matrix using the optimized threshold
+conf_matrix <- confusionMatrix(
+  factor(test_data$pred_class, levels = c(0, 1)),
+  factor(test_data$is_complete, levels = c(0, 1)),
+  positive = "1"
+)
+
+print(conf_matrix)
+  
 ```
