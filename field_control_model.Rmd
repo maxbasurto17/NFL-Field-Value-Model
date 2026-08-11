@@ -225,7 +225,7 @@ library(tidyr)
 
 generate_play_pitch_control <- function(tracking_data, target_game, target_play) {
   
-  # 1. Filter play data and drop any rows with missing tracking coordinates or vectors
+  # 1. Filter play data and clean NAs
   play_data <- tracking_data %>%
     filter(game_id == target_game, play_id == target_play, !is.na(nfl_id)) %>%
     mutate(
@@ -234,7 +234,7 @@ generate_play_pitch_control <- function(tracking_data, target_game, target_play)
       vx = s * sin(dir_rad),
       vy = s * cos(dir_rad)
     ) %>%
-    filter(!is.na(x), !is.na(y), !is.na(vx), !is.na(vy)) # Drops corrupted tracking rows
+    filter(!is.na(x), !is.na(y), !is.na(vx), !is.na(vy))
   
   frames <- sort(unique(play_data$frame_id))
   grids <- build_nfl_grid(n_cols = 120, n_rows = 54)
@@ -251,6 +251,17 @@ generate_play_pitch_control <- function(tracking_data, target_game, target_play)
     offense_df <- frame_data %>% filter(player_side == "offense")
     defense_df <- frame_data %>% filter(player_side == "defense")
     
+    # 2. Identify the Quarterback to use as the ball origin
+    qb_row <- offense_df %>% filter(tolower(player_position) == "qb") %>% slice(1)
+    if(nrow(qb_row) == 0) qb_row <- offense_df %>% slice(1) # Fallback if position label is missing
+    
+    qb_pos <- list(x = qb_row$x, y = qb_row$y)
+    qb_id <- qb_row$nfl_id
+    
+    # 3. EXCLUDE THE QB: Remove the QB's ID from the attacking players list 
+    # so they do not generate control rates or capture territory.
+    attacking_no_qb_df <- offense_df %>% filter(nfl_id != qb_id)
+    
     to_player_list <- function(df) {
       if(nrow(df) == 0) return(list())
       lapply(1:nrow(df), function(i) {
@@ -258,18 +269,10 @@ generate_play_pitch_control <- function(tracking_data, target_game, target_play)
       })
     }
     
-    attacking_players <- to_player_list(offense_df)
+    attacking_players <- to_player_list(attacking_no_qb_df)
     defending_players <- to_player_list(defense_df)
     
-    qb_row <- offense_df %>% filter(tolower(player_position) == "qb") %>% slice(1)
-    if(nrow(qb_row) == 0) qb_row <- offense_df %>% slice(1) 
-    
-    if (nrow(qb_row) > 0) {
-      qb_pos <- list(x = qb_row$x, y = qb_row$y)
-    } else {
-      qb_pos <- list(x = 60, y = 26.6)
-    }
-    
+    # 4. Run model (QB position is passed for ball flight, but they have no control footprint)
     results <- nfl_dynamic_pitch_control(
       attacking_players = attacking_players,
       defending_players = defending_players,
@@ -287,7 +290,7 @@ generate_play_pitch_control <- function(tracking_data, target_game, target_play)
   
   return(list(
     surface_data = bind_rows(all_frames_ppcf),
-    player_data = play_data
+    player_data = play_data # Retains QB so they still show up as a visual dot on the plot
   ))
 }
 
