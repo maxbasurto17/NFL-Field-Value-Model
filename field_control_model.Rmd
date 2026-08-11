@@ -42,13 +42,12 @@ extract_frame_data <- function(nfl_df, target_game, target_play, target_frame) {
   # Filter the dataset to the exact frame
   frame_data <- nfl_df %>%
     filter(game_id == target_game, play_id == target_play, frame_id == target_frame) %>%
-    filter(!is.na(nfl_id)) # Drop the football tracking row if it's categorized as a player
+    filter(!is.na(nfl_id)) 
   
-  # Convert NFL polar coordinates (s, dir) to Cartesian vectors (vx, vy)
-  # In standard BDB data: 0 deg = +Y, 90 deg = +X
+  # Use dir_std for standardized velocity calculations
   frame_data <- frame_data %>%
     mutate(
-      dir_rad = dir * pi / 180,
+      dir_rad = dir_std * pi / 180,
       vx = s * sin(dir_rad),
       vy = s * cos(dir_rad)
     )
@@ -57,14 +56,14 @@ extract_frame_data <- function(nfl_df, target_game, target_play, target_frame) {
   offense_df <- frame_data %>% filter(player_side == "offense")
   defense_df <- frame_data %>% filter(player_side == "defense")
   
-  # Helper to convert dataframe rows into the expected list format
+  # Helper to convert dataframe rows into the expected list format (Updated to x_std, y_std)
   to_player_list <- function(df) {
     lapply(1:nrow(df), function(i) {
       list(
         id = df$nfl_id[i],
         team = df$player_side[i],
-        x = df$x[i],
-        y = df$y[i],
+        x = df$x_std[i],
+        y = df$y_std[i],
         vx = df$vx[i],
         vy = df$vy[i]
       )
@@ -74,7 +73,6 @@ extract_frame_data <- function(nfl_df, target_game, target_play, target_frame) {
   return(list(
     attacking_players = to_player_list(offense_df),
     defending_players = to_player_list(defense_df),
-    # Grab the target destination from the first row (assuming it's identical across the frame)
     target_x = frame_data$ball_land_x_std[1],
     target_y = frame_data$ball_land_y_std[1]
   ))
@@ -210,6 +208,9 @@ nfl_dynamic_pitch_control <- function(attacking_players, defending_players, qb_p
     PPCF_tot[calc_mask] <- PPCF_tot[calc_mask] + dPPCF_att + dPPCF_def
   }
   
+  behind_qb_mask <- grid_x < qb_pos$x
+  PPCF_att[behind_qb_mask] <- 0.0
+  
   return(list(PPCF_att = PPCF_att, PPCF_def = PPCF_def))
 }
 
@@ -223,18 +224,22 @@ library(ggplot2)
 library(gganimate)
 library(tidyr)
 
+# =============================================================================
+# PROCESSING
+# =============================================================================
+
 generate_play_pitch_control <- function(tracking_data, target_game, target_play) {
   
-  # 1. Filter play data and clean NAs
   play_data <- tracking_data %>%
     filter(game_id == target_game, play_id == target_play, !is.na(nfl_id)) %>%
     mutate(
       player_side = tolower(player_side), 
-      dir_rad = dir * pi / 180,
+      dir_rad = dir_std * pi / 180, 
       vx = s * sin(dir_rad),
       vy = s * cos(dir_rad)
     ) %>%
-    filter(!is.na(x), !is.na(y), !is.na(vx), !is.na(vy))
+    # FIX: Drop any player-frames with missing standardized coordinates or velocities
+    filter(!is.na(x_std) & !is.na(y_std) & !is.na(vx) & !is.na(vy))
   
   frames <- sort(unique(play_data$frame_id))
   grids <- build_nfl_grid(n_cols = 120, n_rows = 54)
@@ -251,28 +256,32 @@ generate_play_pitch_control <- function(tracking_data, target_game, target_play)
     offense_df <- frame_data %>% filter(player_side == "offense")
     defense_df <- frame_data %>% filter(player_side == "defense")
     
-    # 2. Identify the Quarterback to use as the ball origin
-    qb_row <- offense_df %>% filter(tolower(player_position) == "qb") %>% slice(1)
-    if(nrow(qb_row) == 0) qb_row <- offense_df %>% slice(1) # Fallback if position label is missing
-    
-    qb_pos <- list(x = qb_row$x, y = qb_row$y)
-    qb_id <- qb_row$nfl_id
-    
-    # 3. EXCLUDE THE QB: Remove the QB's ID from the attacking players list 
-    # so they do not generate control rates or capture territory.
-    attacking_no_qb_df <- offense_df %>% filter(nfl_id != qb_id)
-    
     to_player_list <- function(df) {
       if(nrow(df) == 0) return(list())
       lapply(1:nrow(df), function(i) {
-        list(id = df$nfl_id[i], x = df$x[i], y = df$y[i], vx = df$vx[i], vy = df$vy[i])
+        list(id = df$nfl_id[i], x = df$x_std[i], y = df$y_std[i], vx = df$vx[i], vy = df$vy[i])
       })
     }
     
-    attacking_players <- to_player_list(attacking_no_qb_df)
+    attacking_players <- to_player_list(offense_df)
     defending_players <- to_player_list(defense_df)
     
-    # 4. Run model (QB position is passed for ball flight, but they have no control footprint)
+    qb_row <- offense_df %>% filter(tolower(player_position) == "qb") %>% slice(1)
+    if(nrow(qb_row) == 0) qb_row <- offense_df %>% slice(1) 
+    
+    if (nrow(qb_row) > 0) {
+      qb_pos <- list(x = qb_row$x_std, y = qb_row$y_std)
+      
+      # FIX 1: Exclude the QB from the attacking players list so they exert no control
+      offense_df <- offense_df %>% filter(nfl_id != qb_row$nfl_id)
+    } else {
+      qb_pos <- list(x = 60, y = 26.6)
+    }
+    
+    # Now build the lists (the QB is completely removed from attacking_players)
+    attacking_players <- to_player_list(offense_df)
+    defending_players <- to_player_list(defense_df)
+    
     results <- nfl_dynamic_pitch_control(
       attacking_players = attacking_players,
       defending_players = defending_players,
@@ -290,12 +299,12 @@ generate_play_pitch_control <- function(tracking_data, target_game, target_play)
   
   return(list(
     surface_data = bind_rows(all_frames_ppcf),
-    player_data = play_data # Retains QB so they still show up as a visual dot on the plot
+    player_data = play_data
   ))
 }
 
 # --- EXECUTE --- (Replace with your actual dataset, game, and play)
-play_results <- generate_play_pitch_control(full_df, 2023090700, 101)
+play_results <- generate_play_pitch_control(full_df, 2023090700, 219)
 
 
 ```
@@ -304,14 +313,18 @@ play_results <- generate_play_pitch_control(full_df, 2023090700, 101)
 
 ```{r}
 
+# =============================================================================
+# PLOT
+# =============================================================================
+
 plot_nfl_pitch_control_anim <- function(play_results) {
   
   surface_data <- play_results$surface_data
   
-  # FIX: Force lowercase here too so it never fails on "Defense"/"Offense"
+  # Filter out NAs based on the new standardized coordinate names
   player_data <- play_results$player_data %>%
     mutate(player_side = tolower(player_side)) %>%
-    filter(!is.na(x) & !is.na(y) & !is.na(vx) & !is.na(vy))
+    filter(!is.na(x_std) & !is.na(y_std) & !is.na(vx) & !is.na(vy))
   
   ymin <- 0; ymax <- 53.3
   xmin <- 0; xmax <- 120
@@ -325,7 +338,7 @@ plot_nfl_pitch_control_anim <- function(play_results) {
   
   animated_plot <- field_plot +
     
-    # Pitch control tile surface
+    # Pitch control tile surface (Keep x and y, as they come from the grid expand.grid)
     geom_tile(
       data = surface_data, 
       aes(x = x, y = y, fill = ppcf_att), 
@@ -337,29 +350,29 @@ plot_nfl_pitch_control_anim <- function(play_results) {
       name = "Offense\nControl Prob"
     ) +
     
-    # Velocity Vectors
+    # Velocity Vectors (Update to x_std, y_std)
     geom_segment(
       data = player_data,
       aes(
-        x = x, y = y, 
-        xend = x + vx * 0.5, yend = y + vy * 0.5,
+        x = x_std, y = y_std, 
+        xend = x_std + vx * 0.5, yend = y_std + vy * 0.5,
         color = player_side
       ),
       arrow = arrow(length = unit(0.1, "cm")), 
       linewidth = 0.8 
     ) +
     
-    # Black borders for player dots
+    # Black borders for player dots (Update to x_std, y_std)
     geom_point(
       data = player_data, 
-      aes(x = x, y = y), 
+      aes(x = x_std, y = y_std), 
       size = 4, color = "black"
     ) +
     
-    # Colored inside for player dots
+    # Colored inside for player dots (Update to x_std, y_std)
     geom_point(
       data = player_data, 
-      aes(x = x, y = y, color = player_side), 
+      aes(x = x_std, y = y_std, color = player_side), 
       size = 2.8 
     ) +
     
@@ -385,9 +398,7 @@ plot_nfl_pitch_control_anim <- function(play_results) {
 }
 
 # --- RENDER ---
-# Warning: Rendering a 50+ frame animation with geometric tiles may take 2-4 minutes.
 anim <- plot_nfl_pitch_control_anim(play_results)
 animate(anim, nframes = max(play_results$player_data$frame_id), fps = 10, width = 800, height = 400)
-# anim_save("pitch_control_play.gif")
 
 ```
