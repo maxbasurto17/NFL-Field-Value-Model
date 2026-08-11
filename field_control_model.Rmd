@@ -10,7 +10,7 @@ output: html_document
 library(tidyverse)
 
 # Tracking Data
-full_df <- read_csv("~/Documents/Sports Analytics/Personal Projects/NFL Field Value Model/full_data.csv")
+full_df <- read_csv("~/Documents/Football_R/CMSAC--Field Value/full_data.csv")
 
 ```
 
@@ -306,7 +306,50 @@ generate_play_pitch_control <- function(tracking_data, target_game, target_play)
 # --- EXECUTE --- (Replace with your actual dataset, game, and play)
 play_results <- generate_play_pitch_control(full_df, 2023090700, 219)
 
+#---RUN FOR ALL PLAYS---#
+# 1. REMOVE your old filters
+# OLD: play_data <- df %>% filter(game_id == target_game, play_id == target_play)
 
+# 2. Split the data into a list of dataframes, one for each unique game and play
+plays_list <- full_df %>%
+  group_by(game_id, play_id) %>%
+  group_split()
+
+# 3. Initialize empty lists to store your results
+season_results_list <- list()
+surface_data_list <- list()
+
+# 4. Loop through all games and plays
+for(i in seq_along(plays_list)) {
+  
+  play_data <- plays_list[[i]]
+  
+  # Extract the current IDs so we can tag the surface data later
+  current_game_id <- play_data$game_id[1]
+  current_play_id <- play_data$play_id[1]
+  
+  play_result <- generate_play_pitch_control(full_df, current_game_id, current_play_id)
+  surface_data <- play_result$surface_data
+  
+  
+  # 5. Tag the surface data with the current game_id and play_id
+  # (If surface_data is a dataframe/tibble)
+  surface_data <- surface_data %>%
+    mutate(
+      game_id = current_game_id,
+      play_id = current_play_id
+    )
+  
+  # 6. Store the results in our lists
+  season_results_list[[i]] <- play_result
+  surface_data_list[[i]] <- surface_data
+}
+
+# 7. Bind everything together into your final objects
+season_results <- bind_rows(season_results_list)
+final_surface_data <- bind_rows(surface_data_list)
+
+write.csv(final_surface_data, "field_control_data.csv")
 ```
 
 # Plot
