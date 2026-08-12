@@ -1,0 +1,71 @@
+---
+title: "Coverage_Efficiency"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(nflfastR)
+library(nflplotR)
+library(purrr)
+library(readr)
+library(mgcv)
+
+# Tracking Data
+full_df <- read_csv("~/Documents/Football_R/CMSAC--Field Value/full_data.csv")
+field_control <- read.csv("~/Documents/Football_R/CMSAC--Field Value/field_control_data.csv")
+
+#Field Value Model
+field_value <- readRDS("~/Documents/Football_R/CMSAC--Field Value/gam_field_value_model.rds")
+```
+
+```{r}
+play_data <- full_df %>% 
+  select(game_id, play_id, frame_id, ball_land_y_std, expected_points, los_x_std, dropback_distance) %>% 
+  distinct()
+
+feed_model <- field_control %>% 
+  left_join(play_data, by = c("game_id", "frame_id", "play_id")) %>% 
+  mutate(pass_depth = x - los_x_std) %>% 
+  select(game_id, play_id, frame_id, ppcf_att, ball_land_y_std, expected_points, los_x_std, pass_depth, dropback_distance) %>% 
+  # Eliminate impossible passes that land beyond the back of the endzone (110 yards)
+  filter((los_x_std + pass_depth) <= 110)
+
+# Assuming your big dataset is loaded, or you are reading it in chunks
+chunk_size <- 1000000  # Process 1 million rows at a time
+total_rows <- nrow(feed_model)
+predictions_list <- list()
+
+for (i in seq(1, total_rows, by = chunk_size)) {
+  
+  # Define start and end of chunk
+  start_row <- i
+  end_row <- min(i + chunk_size - 1, total_rows)
+  
+  # Subset the data
+  chunk <- feed_model[start_row:end_row, ]
+  
+  # Predict and store in the list
+  cat("Predicting rows", start_row, "to", end_row, "\n")
+  predictions_list[[length(predictions_list) + 1]] <- predict(field_value, newdata = chunk)
+  
+  # Free up memory
+  rm(chunk)
+  gc() # Force garbage collection
+}
+
+# Combine all predictions back together, compute point efficiency
+feed_model$pred_post_epa <- unlist(predictions_list)
+feed_model$epa <-  feed_model$pred_post_epa - feed_model$expected_points
+feed_model$efficiency <- feed_model$epa * feed_model$ppcf_att
+all_efficiency <- feed_model %>% 
+  mutate(efficiency = ifelse((pass_depth - dropback_distance) <= 0, 0, efficiency)) %>% 
+  group_by(game_id, play_id) %>% 
+  summarize(
+    coverage_efficiency = mean(efficiency),
+    throw_frame = first(frame_id), 
+    pass_depth = first(pass_depth)
+  )
+
+write.csv(all_efficiency, "pbp_coverage_efficiency.csv")
+```
