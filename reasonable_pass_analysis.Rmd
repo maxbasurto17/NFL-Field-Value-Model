@@ -36,97 +36,132 @@ pass_info <- main %>%
 
 ```{r}
 
-completed_passes <- pass_info %>%
-  filter(pass_result == "C")
-
 library(dplyr)
 library(quantreg)
 library(purrr)
 library(tidyr)
 library(ggplot2)
 
-# 1. Define independent candidate sequences for X (depth) and Y (width)
+set.seed(42)
+
+# =============================================================================
+# 1. TRAIN / TEST SPLIT (80% Train, 20% Test)
+# =============================================================================
+# Model absolute error values for symmetric radii
+processed_data <- completed_pass_bounds %>%
+  mutate(
+    abs_err_x = abs(err_x),
+    abs_err_y = abs(err_y)
+  )
+
+train_idx  <- sample(seq_len(nrow(processed_data)), size = floor(0.80 * nrow(processed_data)))
+train_data <- processed_data[train_idx, ]
+test_data  <- processed_data[-train_idx, ]
+
+# =============================================================================
+# 2. DEFINE CANDIDATE SEQUENCES & PRE-COMPUTE PREDICTIONS
+# =============================================================================
 tau_x_cand <- seq(0.85, 0.995, by = 0.005)
 tau_y_cand <- seq(0.85, 0.995, by = 0.005)
 
-# 2. Pre-compute model predictions to optimize loop performance
-preds_x <- map(tau_x_cand, ~ pmax(predict(rq(err_x ~ receiver_depth, tau = .x, data = completed_pass_bounds)), 0.1))
-names(preds_x) <- as.character(tau_x_cand)
+# Train models ON TRAIN DATA and generate predictions for BOTH Train and Test sets
+preds_x_train <- map(tau_x_cand, ~ pmax(predict(rq(abs_err_x ~ receiver_depth, tau = .x, data = train_data, method = "fn")), 0.1))
+preds_x_test  <- map(tau_x_cand, ~ pmax(predict(rq(abs_err_x ~ receiver_depth, tau = .x, data = train_data, method = "fn"), newdata = test_data), 0.1))
+names(preds_x_train) <- names(preds_x_test) <- as.character(tau_x_cand)
 
-preds_y <- map(tau_y_cand, ~ pmax(predict(rq(err_y ~ receiver_depth, tau = .x, data = completed_pass_bounds)), 0.1))
-names(preds_y) <- as.character(tau_y_cand)
+preds_y_train <- map(tau_y_cand, ~ pmax(predict(rq(abs_err_y ~ receiver_depth, tau = .x, data = train_data, method = "fn")), 0.1))
+preds_y_test  <- map(tau_y_cand, ~ pmax(predict(rq(abs_err_y ~ receiver_depth, tau = .x, data = train_data, method = "fn"), newdata = test_data), 0.1))
+names(preds_y_train) <- names(preds_y_test) <- as.character(tau_y_cand)
 
-# 3. Evaluate all (tau_x, tau_y) pairs
+# =============================================================================
+# 3. EVALUATE ALL PAIRS ON TRAIN AND TEST SETS
+# =============================================================================
 tau_grid <- expand_grid(tau_x = tau_x_cand, tau_y = tau_y_cand)
 
 eval_grid <- map2_dfr(tau_grid$tau_x, tau_grid$tau_y, function(tx, ty) {
-  rx <- preds_x[[as.character(tx)]]
-  ry <- preds_y[[as.character(ty)]]
+  # --- Training Predictions & Metrics ---
+  rx_train <- preds_x_train[[as.character(tx)]]
+  ry_train <- preds_y_train[[as.character(ty)]]
+  in_ellipse_train <- ((train_data$err_x / rx_train)^2 + (train_data$err_y / ry_train)^2) <= 1.0
   
-  in_ellipse <- ((completed_pass_bounds$err_x / rx)^2 + (completed_pass_bounds$err_y / ry)^2) <= 1.0
-  area <- pi * rx * ry
+  # --- Testing Predictions & Metrics ---
+  rx_test  <- preds_x_test[[as.character(tx)]]
+  ry_test  <- preds_y_test[[as.character(ty)]]
+  in_ellipse_test  <- ((test_data$err_x / rx_test)^2 + (test_data$err_y / ry_test)^2) <= 1.0
   
   tibble(
     tau_x = tx,
     tau_y = ty,
-    actual_coverage = mean(in_ellipse),
-    avg_area_sq_yds = mean(area)
+    
+    # IN-SAMPLE METRICS (Used for Decision Making)
+    train_coverage = mean(in_ellipse_train),
+    train_avg_area = mean(pi * rx_train * ry_train),
+    
+    # OUT-OF-SAMPLE METRICS (Used for Validation)
+    test_coverage  = mean(in_ellipse_test),
+    test_avg_area  = mean(pi * rx_test * ry_test)
   )
 })
 
-# 4. Extract true non-dominated Pareto frontier points
+# =============================================================================
+# 4. PARETO FRONTIER & SELECTION (BASED STRICTLY ON TRAIN METRICS)
+# =============================================================================
 pareto_frontier <- eval_grid %>%
-  arrange(avg_area_sq_yds) %>%
-  mutate(max_cov_so_far = cummax(actual_coverage)) %>%
-  filter(actual_coverage == max_cov_so_far) %>%
-  distinct(actual_coverage, .keep_all = TRUE) %>%
+  arrange(train_avg_area) %>%
+  mutate(max_train_cov_so_far = cummax(train_coverage)) %>%
+  filter(train_coverage == max_train_cov_so_far) %>%
+  distinct(train_coverage, .keep_all = TRUE) %>%
   mutate(
-    d_cov = actual_coverage - lag(actual_coverage),
-    d_area = avg_area_sq_yds - lag(avg_area_sq_yds),
-    efficiency = d_cov / d_area
+    d_cov = train_coverage - lag(train_coverage),
+    d_area = train_avg_area - lag(train_avg_area),
+    train_efficiency = d_cov / d_area
   )
 
-# 5. Plot Pareto frontier with all 2D evaluated pairs
+# Select optimal combination using TRAIN efficiency (Gated at >= 90% Train Coverage)
+best_gated_tau <- pareto_frontier %>%
+  filter(train_coverage >= 0.90) %>%
+  arrange(desc(train_efficiency)) %>%
+  slice(1)
+
+# Print comparison between Train selection and Test validation
+cat("--- OPTIMAL PARAMETER SELECTION & GENERALIZATION TEST ---\n")
+best_gated_tau %>%
+  select(
+    tau_x, tau_y, 
+    train_coverage, test_coverage, 
+    train_avg_area, test_avg_area, 
+    train_efficiency
+  ) %>%
+  print()
+
+# =============================================================================
+# 5. PLOT TRAIN PARETO FRONTIER WITH TEST OVERLAY
+# =============================================================================
 ggplot() +
-  geom_point(data = eval_grid, aes(x = avg_area_sq_yds, y = actual_coverage), color = "grey80", alpha = 0.4) +
-  geom_line(data = pareto_frontier, aes(x = avg_area_sq_yds, y = actual_coverage), color = "blue", linewidth = 1) +
-  geom_point(data = pareto_frontier, aes(x = avg_area_sq_yds, y = actual_coverage, color = tau_x), size = 2.5) +
-  scale_color_viridis_c() +
+  geom_point(data = eval_grid, aes(x = train_avg_area, y = train_coverage), color = "grey80", alpha = 0.4) +
+  geom_line(data = pareto_frontier, aes(x = train_avg_area, y = train_coverage), color = "blue", linewidth = 1) +
+  geom_point(data = best_gated_tau, aes(x = train_avg_area, y = train_coverage), color = "red", size = 4) +
+  geom_point(data = best_gated_tau, aes(x = test_avg_area, y = test_coverage), color = "darkgreen", size = 4) +
   labs(
-    title = "True 2D Pareto Frontier: Independent (tau_x, tau_y) Grid Search",
+    title = "Pareto Frontier (Chosen on Train Data)",
+    subtitle = "Red dot = Chosen Train Performance | Green dot = Validation Test Performance",
     x = "Average Ellipse Area (sq yards)",
-    y = "Actual Completed Passes Captured (%)",
-    color = "tau_x"
+    y = "Completed Passes Captured (%)"
   ) +
   theme_minimal()
 
-# 6. Display optimal combinations ranked by efficiency
-pareto_frontier %>%
-  filter(!is.na(efficiency)) %>%
-  arrange(desc(efficiency)) %>%
-  select(tau_x, tau_y, actual_coverage, avg_area_sq_yds, efficiency)
+# =============================================================================
+# 6. FIT FINAL PRODUCTION MODELS ON FULL DATASET
+# =============================================================================
+qr_x_final <- rq(abs_err_x ~ receiver_depth, tau = best_gated_tau$tau_x, data = processed_data, method = "fn")
+qr_y_final <- rq(abs_err_y ~ receiver_depth, tau = best_gated_tau$tau_y, data = processed_data, method = "fn")
 
-# Find the most efficient tau_x / tau_y pair that captures at least 90% of completions
-best_gated_tau <- pareto_frontier %>%
-  filter(actual_coverage >= 0.90) %>%
-  arrange(desc(efficiency)) %>%
-  slice(1)
+cat("\n--- FINAL PRODUCTION COEFFICIENTS ---\n")
+cat("Vertical Semi-Axis (Rx) Coefficients:\n")
+print(coef(qr_x_final))
 
-print(best_gated_tau)
-
-```
-
-# Final Coefficients
-
-```{r}
-
-# Final production quantile regressions
-qr_x_final <- rq(err_x ~ receiver_depth, tau = 0.945, data = completed_pass_bounds)
-qr_y_final <- rq(err_y ~ receiver_depth, tau = 0.990, data = completed_pass_bounds)
-
-# Print final semi-axes equations
-coef(qr_x_final)
-coef(qr_y_final)
+cat("\nHorizontal Semi-Axis (Ry) Coefficients:\n")
+print(coef(qr_y_final))
 
 ```
 
@@ -138,10 +173,6 @@ library(dplyr)
 library(ggplot2)
 library(quantreg)
 library(tidyr)
-
-# 1. Fit production quantile regressions at chosen optimal taus
-qr_x_final <- rq(err_x ~ receiver_depth, tau = 0.945, data = completed_pass_bounds)
-qr_y_final <- rq(err_y ~ receiver_depth, tau = 0.990, data = completed_pass_bounds)
 
 # 2. Sample 9 distinct plays and calculate dynamic semi-axes (R_x, R_y)
 set.seed(42) # Set seed for reproducible sample selection
@@ -220,5 +251,15 @@ ggplot() +
     x = "Field X (Standardized Yards)",
     y = "Field Y (Standardized Yards)"
   )
+
+```
+
+# Non Linear Radius Model
+
+maybe we'll see
+
+```{r}
+
+
 
 ```
