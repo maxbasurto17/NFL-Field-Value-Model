@@ -10,7 +10,7 @@ output: html_document
 library(tidyverse)
 
 # Tracking Data
-full_df <- read_csv("~/Documents/Football_R/CMSAC--Field Value/full_data.csv")
+full_df <- read_csv("~/Documents/Sports Analytics/2026 CMSAC RRC/full_data.csv")
 
 ```
 
@@ -19,32 +19,35 @@ full_df <- read_csv("~/Documents/Football_R/CMSAC--Field Value/full_data.csv")
 ```{r}
 
 library(dplyr)
+library(stats)
 
 # =============================================================================
-# SECTION 1 — NFL GRID SETUP
+# SECTION 1 — TRACKING DATA PARSER (UPDATED FOR INDIVIDUAL KINEMATICS)
 # =============================================================================
 
-build_nfl_grid <- function(pitch_length = 120.0, pitch_width = 53.3, n_cols = 120, n_rows = 54) {
-  xs <- seq(0, pitch_length, length.out = n_cols)
-  ys <- seq(0, pitch_width, length.out = n_rows)
-  
-  grid_x <- matrix(rep(xs, each = n_rows), nrow = n_rows, ncol = n_cols)
-  grid_y <- matrix(rep(ys, times = n_cols), nrow = n_rows, ncol = n_cols)
-  
-  return(list(x = grid_x, y = grid_y))
+get_player_kinematic_bounds <- function(nfl_df) {
+  nfl_df %>%
+    filter(!is.na(nfl_id)) %>%
+    group_by(nfl_id) %>%
+    summarise(
+      vmax = quantile(s, probs = 0.95, na.rm = TRUE),
+      acceleration = quantile(a, probs = 0.95, na.rm = TRUE),
+      .groups = "drop"
+    )
 }
 
-# =============================================================================
-# SECTION 2 — TRACKING DATA PARSER
-# =============================================================================
-
-extract_frame_data <- function(nfl_df, target_game, target_play, target_frame) {
-  # Filter the dataset to the exact frame
+extract_frame_data <- function(nfl_df, target_game, target_play, target_frame, player_bounds_df = NULL) {
+  # Calculate 95th percentile bounds across the provided dataset if not pre-supplied
+  if (is.null(player_bounds_df)) {
+    player_bounds_df <- get_player_kinematic_bounds(nfl_df)
+  }
+  
+  # Filter to target frame and join player kinematic bounds
   frame_data <- nfl_df %>%
     filter(game_id == target_game, play_id == target_play, frame_id == target_frame) %>%
-    filter(!is.na(nfl_id)) 
+    filter(!is.na(nfl_id)) %>%
+    left_join(player_bounds_df, by = "nfl_id")
   
-  # Use dir_std for standardized velocity calculations
   frame_data <- frame_data %>%
     mutate(
       dir_rad = dir_std * pi / 180,
@@ -52,20 +55,20 @@ extract_frame_data <- function(nfl_df, target_game, target_play, target_frame) {
       vy = s * cos(dir_rad)
     )
   
-  # Split into offense and defense lists
   offense_df <- frame_data %>% filter(player_side == "offense")
   defense_df <- frame_data %>% filter(player_side == "defense")
   
-  # Helper to convert dataframe rows into the expected list format (Updated to x_std, y_std)
   to_player_list <- function(df) {
     lapply(1:nrow(df), function(i) {
       list(
-        id = df$nfl_id[i],
-        team = df$player_side[i],
-        x = df$x_std[i],
-        y = df$y_std[i],
-        vx = df$vx[i],
-        vy = df$vy[i]
+        id           = df$nfl_id[i],
+        team         = df$player_side[i],
+        x            = df$x_std[i],
+        y            = df$y_std[i],
+        vx           = df$vx[i],
+        vy           = df$vy[i],
+        vmax         = df$vmax[i],         # 95th percentile speed
+        acceleration = df$acceleration[i]  # 95th percentile acceleration
       )
     })
   }
@@ -73,16 +76,20 @@ extract_frame_data <- function(nfl_df, target_game, target_play, target_frame) {
   return(list(
     attacking_players = to_player_list(offense_df),
     defending_players = to_player_list(defense_df),
-    target_x = frame_data$ball_land_x_std[1],
-    target_y = frame_data$ball_land_y_std[1]
+    target_x          = frame_data$ball_land_x_std[1],
+    target_y          = frame_data$ball_land_y_std[1]
   ))
 }
 
 # =============================================================================
-# SECTION 3 — KINEMATICS & BALL FLIGHT (NFL TUNED)
+# SECTION 2 — KINEMATICS & BALL FLIGHT (PLAYER-SPECIFIC BOUNDS)
 # =============================================================================
 
-player_time_to_intercept <- function(player, target_x, target_y, vmax = 11.0, acceleration = 8.0) {
+player_time_to_intercept <- function(player, target_x, target_y) {
+  # Use player-specific bounds stored in player object
+  vmax <- player$vmax
+  acceleration <- player$acceleration
+  
   p0 <- c(player$x, player$y)
   v0_vec <- c(player$vx, player$vy)
   
@@ -105,10 +112,10 @@ player_time_to_intercept <- function(player, target_x, target_y, vmax = 11.0, ac
   if (is.null(dim(distances))) tti <- numeric(length(distances))
   
   acc_phase_mask <- d_acc >= distances
-  acc_phase_mask[is.na(acc_phase_mask)] <- FALSE # Safeguard against NA
+  acc_phase_mask[is.na(acc_phase_mask)] <- FALSE
   
   cruise_phase_mask <- !acc_phase_mask
-  cruise_phase_mask[is.na(cruise_phase_mask)] <- FALSE # Safeguard against NA
+  cruise_phase_mask[is.na(cruise_phase_mask)] <- FALSE
   
   sqrt_term <- pmax(v0_proj^2 + 2 * acceleration * distances, 0)
   
@@ -122,60 +129,19 @@ player_time_to_intercept <- function(player, target_x, target_y, vmax = 11.0, ac
   return(tti)
 }
 
-estimate_nfl_pass_bounds <- function(distances) {
-  # Approximations for thrown footballs in yards
-  # Fast bullet pass ~ 30 yds/sec, high lob ~ 15 yds/sec
-  min_time <- distances / 30.0 
-  max_time <- distances / 15.0
-  return(list(min = pmax(min_time, 0.0), max = pmax(max_time, 0.0)))
-}
-
-football_travel_time <- function(qb_x, qb_y, target_x, target_y, attacking_players) {
-  dx <- target_x - qb_x
-  dy <- target_y - qb_y
-  distances <- sqrt(dx^2 + dy^2)
-  
-  bounds <- estimate_nfl_pass_bounds(distances)
-  
-  tti_shape <- dim(target_x)
-  if (is.null(tti_shape)) nearest_attacker_tti <- rep(Inf, length(target_x))
-  else nearest_attacker_tti <- array(Inf, dim = tti_shape)
-  
-  for (player in attacking_players) {
-    # Skip if player is the QB (assumed to be the one throwing)
-    if (abs(player$x - qb_x) < 0.1 && abs(player$y - qb_y) < 0.1) next
-    
-    player_tti <- player_time_to_intercept(player, target_x, target_y)
-    nearest_attacker_tti <- pmin(nearest_attacker_tti, player_tti)
-  }
-  
-  selected_ball_time <- pmin(pmax(nearest_attacker_tti, bounds$min), bounds$max)
-  return(selected_ball_time)
-}
-
 # =============================================================================
-# SECTION 4 — ARRIVAL PROBABILITY & INTEGRATION
+# SECTION 3 — PITCH CONTROL INTEGRATION
 # =============================================================================
-
-arrival_probability <- function(t, tti, tti_sigma = 0.54) {
-  exponent <- -pi / sqrt(3.0) / tti_sigma * (t - tti)
-  exponent <- pmin(pmax(exponent, -50), 50)
-  return(1.0 / (1.0 + exp(exponent)))
-}
-
-control_rate <- function(t, tti, lambda_j = 3.99, tti_sigma = 0.54) {
-  P <- arrival_probability(t, tti, tti_sigma)
-  return(P * lambda_j)
-}
 
 nfl_dynamic_pitch_control <- function(attacking_players, defending_players, qb_pos, grid_x, grid_y,
-                                      dt = 0.05, max_time = 8.0, vmax = 11.0, acceleration = 8.0,
-                                      lambda_att = 3.99, kappa = 1.72, tti_sigma = 0.54) {
+                                       dt = 0.05, max_time = 8.0, lambda_att = 3.99, 
+                                       kappa = 1.72, tti_sigma = 0.54) {
   
   lambda_def <- lambda_att * kappa
   
-  TTI_att <- lapply(attacking_players, function(p) player_time_to_intercept(p, grid_x, grid_y, vmax, acceleration))
-  TTI_def <- lapply(defending_players, function(p) player_time_to_intercept(p, grid_x, grid_y, vmax, acceleration))
+  # Computes TTI passing each player object (containing its own vmax and acceleration)
+  TTI_att <- lapply(attacking_players, function(p) player_time_to_intercept(p, grid_x, grid_y))
+  TTI_def <- lapply(defending_players, function(p) player_time_to_intercept(p, grid_x, grid_y))
   
   T_ball <- football_travel_time(qb_pos$x, qb_pos$y, grid_x, grid_y, attacking_players)
   
