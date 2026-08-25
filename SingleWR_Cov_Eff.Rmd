@@ -124,9 +124,9 @@ player_time_to_intercept <- function(player, target_x, target_y, vmax = 11.0, ac
 
 estimate_nfl_pass_bounds <- function(distances) {
   # Approximations for thrown footballs in yards
-  # Fast bullet pass ~ 30 yds/sec, high lob ~ 15 yds/sec
-  min_time <- distances / 30.0 
-  max_time <- distances / 15.0
+  # Fast bullet pass ~ 23 yds/sec, high lob ~ 14 yds/sec
+  min_time <- distances / 23.0 
+  max_time <- distances / 14.0
   return(list(min = pmax(min_time, 0.0), max = pmax(max_time, 0.0)))
 }
 
