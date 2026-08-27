@@ -1,0 +1,55 @@
+---
+title: "Dangerous Viable Space (DVS): A Spatial Control Framework for Quantifying NFL Wide Receiver Route-Running Threat"
+author: "Suhas Narra and Max Basurto"
+date: today
+abstract: "In the NFL, route-running is one of a wide receiver’s (WR) most important skills. While current NFL wide receiver route-running metrics are often rudimentary and lack information about the threat of a given route, our research quantifies route-running ability by combining spatial control and expected threat. By applying Spearman’s soccer pitch control methodology (2017) to NFL tracking data, we created a physics-based, machine-learning-less model to identify WR and defensive back (DB) spatial control over the course of a pass play. To better understand the value of the space WRs control relative to DBs, we weight it by an xEPA model that assigns a threat value to each field location. This product yields the WR's Dangerous Viable Space (DVS) at each point in time. By taking the average and maximum of the wide receiver’s DVS, we can calculate both the receiver’s Average Route Threat Efficiency (aRTE) and Maximum Route Threat Efficiency (mRTE), respectively. By isolating wide receiver route-running ability from target share and throw outcome, aRTE and mRTE offer clearer metrics for evaluating downfield threat, scheme fit, and receiver archetypes.
+"
+format:
+  pdf:
+    documentclass: article
+    geometry:
+      - top=0.5in
+      - bottom=0.5in
+      - left=0.5in
+      - right=0.5in
+---
+
+# 1 Introduction & Motivation
+
+In American football, evaluating a wide receiver’s (WR) route-running performance remains heavily polluted by downstream outcomes and lacks comprehensive metrics that evaluate all components of route running. Traditional box-score metrics such as targets, yards per route run (YPRR), and completion percentage are fundamentally conditional on quarterback decision-making, offensive line protection, and play design. Modern Next Gen Stats tracking metrics, such as separation at the time of release or catch, evaluate receivers only at discrete static moments. These snapshots ignore how a receiver creates, sustains, or loses spatial control across the full life of a pass play. Furthermore, existing spatial models treat all open field as equally valuable. Gaining two yards of separation near the line of scrimmage on 3rd & 15 does not contribute equally to drive success as gaining equal separation beyond the line to gain. Since separation metrics are considered in a vaccum, this true value a WR generates through creating space at different field depths is often lost. 
+
+This creates a critical analytical gap: a receiver who runs a crisp route and establishes leverage in high-value field real estate receives zero or little credit if the quarterback is sacked or progresses elsewhere; meanwhile a receiver who wins late against a blown coverage can inherit inflated outcome metrics. To truly isolate wide receiver route-running quality from team-level noise, an evaluation framework must satisfy three criteria:
+
+- **Continuous Evaluation**: Track spatial control continuously across every frame of a route, rather than relying on isolated snapshots.
+
+- **Contextual Valuation**: Weight spatial control by the leverage and scoring value of that specific area on the field.
+
+- **Physical Realism**: Bound spatial control to realistic, viable passing trajectories given player speed, acceleration limits, and throw geometry.
+
+To address these requirements, we introduce Dangerous Viable Space (**DVS**), a spatial control framework that quantifies a receiver's real-time threat generation. We adapt Spearman’s (2017) physics-based soccer pitch control model to the discrete mechanics of American football, modeling receiver and defensive back movement dynamics alongside aerial ball trajectories. We layer this spatial control surface over a spatial Expected Points Added (**xEPA**) model that assigns an expected drive-value generation to every point on the grid. Crucially, we restrict evaluation exclusively to Reasonable Pass Bounds—a dynamically calculated Pareto frontier that isolates physically viable throw envelopes for the quarterback. By accumulating DVS across each frame of a route, we propose two novel, target-independent evaluation metrics:
+
+- **Average Route Threat Efficiency (aRTE)**: Quantifies a receiver’s ability to sustain control over high-value space throughout the duration of a route.
+- **Maximum Route Threat Efficiency (mRTE)**: Captures peak window-creation ability, measuring how effectively a receiver creates maximum threat during key timing windows.
+
+By stripping out target bias, play outcome variance, and screen-play execution noise, aRTE and mRTE provide coaches and front-office analysts with an objective metric for evaluating isolated WR skill, scheme fit, and receiver archetypes.
+
+The remainder of this paper is structured as follows: Section 2 outlines the NFL Big Data Bowl dataset and our data curation pipeline; Section 3 details the spatial xEPA field valuation model, the adapted physics-based pitch control model, and the Pareto-frontier pass bounds; Section 4 presents empirical results and validates the aRTE and mRTE metrics across player archetypes; Section 5 discusses practical applications for NFL front offices and coaching staff; and Section 6 provides our reproducibility statement and computational repository structure.
+
+# 2 Data
+
+Data for this study are sourced from the open-access 2026 NFL Big Data Bowl dataset (NFL, 2025), comprising over 14,000 passing attempts from the 2023 NFL regular season. The dataset combines high-frequency spatial-temporal tracking captured at 10 Hz (10 observations per second) with rich play-level metadata. The tracking data records continuous positional coordinates ($x, y$), speed, acceleration, and orientation for all eligible receivers, defensive backs, and quarterbacks from the moment the ball is snapped until the pass is rendered complete or incomplete.  
+
+To ensure physical and spatial consistency across all plays, raw tracking coordinates were transformed into a standardized left-to-right offensive coordinate system ($x \in [0, 120]$, $y \in [0, 53.33]$ yards). This spatial normalization enforces directional invariance across kinematic vectors—such as velocity ($\vec{v}$), acceleration ($\vec{a}$), and orientation ($\theta$)—mapping every route onto a uniform $120 \times 54$ one-yard cellular grid regardless of drive direction or end zone orientation.
+
+Play-level metadata (down, distance, yardline, and baseline expected points) was joined with frame-level tracking via unique relational identifiers (gameId, playId, nflId). To systematically evaluate route execution, the temporal window for each play is partitioned into two distinct phases:  
+
+- **Pre-pass phase**: From ball snap to pass release, representing the core analytical window for evaluating continuous route-running threat generation.
+- **Post-pass phase**: From pass release to ball arrival or outcome, utilized primarily to calibrate pass trajectory bounds and completion probabilities.
+
+Plays designated as wide receiver screens, spikes, sacks, or pre-pass penalties were filtered out of the primary sample to isolate true downfield route execution from deliberate backfield design and play-breakdown noise.
+
+# 3 Methodology & Modeling Framework
+## 3.1 Field Control Model
+## 3.2 Field Value Model (xEPA)
+## 3.3 Reasonable Pass Bounds 
+## 3.4 Dangerous Viable Space (DVS) 
