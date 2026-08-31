@@ -50,6 +50,86 @@ Plays designated as wide receiver screens, spikes, sacks, or pre-pass penalties 
 
 # 3 Methodology & Modeling Framework
 ## 3.1 Field Control Model
+
+Our pitch control framework adapts William Spearman’s (2017) physics-based spatial ownership model to the specific kinematics of American football. Because the flight profile and arrival mechanics of an aerial football pass differ fundamentally from a soccer pass, we re-engineered the ball kinematics to map expected completion percentages continuously across the field.
+
+To isolate individual wide receiver route-running ability, the model evaluates a single targeted receiver against all secondary defenders on a uniform $120 \times 54$ grid of 1-yard by 1-yard cells. This approach strips away the noise of offensive scheme and supporting cast positioning to isolate a given WR's value creation.
+
+### Kinematics and Time-to-Intercept (TTI)
+
+Player movement toward any field coordinate is partitioned into an acceleration phase and a cruising phase. Current speed ($v_0$) is extracted from tracking data, while maximum velocity ($v_{max}$) and maximum acceleration ($a_{max}$) are dynamically bounded using each player's historical 99th-percentile tracking metrics. The distance a player can cover during their acceleration phase ($t_{acc}$) is calculated as $d_{acc} = v_0 t_{acc} + \frac{1}{2} a_{max} t_{acc}^2$.
+
+Each player's Time-to-Intercept ($TTI$) is computed based on whether they will reach maximum velocity before reaching the target point. 
+
+If the target distance $d \le d_{acc}$, the Time-to-Intercept ($TTI$) is solved via the quadratic equation:
+$$TTI = \frac{-v_0 + \sqrt{v_0^2 + 2a_{max}d}}{a_{max}}$$
+If the player reaches maximum velocity before arriving at the target, then the remainder of the distance is traversed at constant speed:
+$$TTI = t_{acc} + \frac{d - d_{acc}}{v_{max}}$$
+
+Ball flight times are determined by calculating the distance to the target and bounding the 2D velocity of the football ($v_{ball}$) between 14 yds/sec (lob passes) and 23 yds/sec (bullet passes), reflecting empirical 5th and 95th percentile NFL throw speeds. In multi-receiver computations, the ball arrival time is calibrated to the receiver who arrives first, assuming optimal quarterback execution.
+
+### Spatial Control and Arrival Probability
+
+The probability of a player arriving at a target cell by time $t$ uses a logistic arrival model based on the difference between the current time and their $TTI$:
+$$P(t) = \frac{1}{1 + e^{-c (t - TTI)}}$$
+(where $c$ represents the logistic scaling variance constant). Field control is calculated iteratively across infinitesimally small time intervals ($dt$). As players approach the target, their exerted control accumulates. To govern this dynamic control surface, we enforce the following football-specific mechanical assumptions:
+
+- **Arrival-Dependent Control & Decay**: Player control over any field location remains strictly zero until the simulated pass reaches that location ($t < T_{\text{ball}}$). Once the ball arrives ($t \ge T_{\text{ball}}$), control accumulates dynamically over time step $dt$. As total accumulated control ($PPCF_{\text{tot}}$) approaches 100%, the available unallocated space ($(1 - PPCF_{\text{tot}})$) diminishes, making it exponentially harder for opposing players to usurp an already controlled cell.The incremental change in Pitch Control ($dPPCF$) is modeled as:
+$$dPPCF = \begin{cases} 0, & t < T_{\text{ball}} \\ (1 - PPCF_{\text{tot}}) \cdot (P(t) \cdot \lambda) \cdot dt, & t \ge T_{\text{ball}} \end{cases}$$
+where $T_{\text{ball}}$ is the time required for the football to reach the target cell, $P(t)$ is the player's logistic arrival probability, and $\lambda$ is their base control rate.
+
+- **Defensive Advantage ($\lambda$)**: Following Spearman’s (2018) foundational pitch control framework, the defensive control rate ($\lambda_{def}$) is scaled by a coefficient of $\kappa = 1.17$. Derived via Maximum Likelihood Estimation, this grants defenders a 17% spatial acquisition advantage, mathematically reflecting the empirical reality that disrupting a pass requires significantly less time and precision than catching and securing one. It is important to note that while Spearman's paper derived pitch control parameters for soccer, this framework uses coefficients optimized for football. 
+
+- **Forward Pass Masking**: Expected completion percentage is strictly masked to 0 for all spatial coordinates behind the quarterback ($x \le x_{qb}$). Backward passes mechanically function as run plays. Allowing receivers to accumulate spatial value behind the line of scrimmage would distort the evaluation of downfield route-running threat.
+
+- **Quarterback Exclusion**: The quarterback's spatial control rate ($\lambda_{qb}$) is permanently forced to 0. The quarterback cannot complete a pass to himself, so his tracking coordinates only serve as the geometric origin point for throw distance calculations.   
+
 ## 3.2 Field Value Model (xEPA)
-## 3.3 Reasonable Pass Bounds 
+
+The field value model quantifies the magnitude of drive-specific Expected Points ($EP$) generated by isolating the specific context of a play independent of game-state noise like win probability. A 20-yard reception on 3rd & 15 carries identical intrinsic spatial value whether a team is tied or trailing by 30 points. To evaluate wide receivers independent of their supporting cast and overarching game state, Expected Points isolations best answer where and how much field position gains support a team's localized effort to score.
+
+### Data Architecture and Spatial Symmetry
+
+The response variable for the model is Post-Play Expected Points ($PostEP$), calculated by adding the realized Expected Points Added ($EPA$) to the pre-play Expected Points ($PreEP$). To prevent the model from learning artificial directional biases based on empirical dataset tendencies (e.g., right-handed quarterbacks preferring to throw to the right sideline), coordinate geometry is forced into strict symmetry. Prior to fitting, the spatial training data is duplicated and reflected across the field's longitudinal center. Every empirical pass coordinate is appended with a mirrored counterpart by transforming the vertical coordinate as $y_{mirrored} = 53.3 - y_{std}$.
+
+### Generalized Additive Model (GAM) Formulation
+
+To map continuous expected value across the field, the framework utilizes a Generalized Additive Model (GAM). The expected post-play value is modeled using a 3-dimensional tensor product smooth for the spatial parameters, while strictly controlling for pre-play expected points via a separate 1D marginal smooth.  
+
+The full model takes the form:
+$$\mathbb{E}[PostEP] = \beta_0 + f_{spatial}(x_{depth}, y_{land}, x_{los}) + f_{context}(PreEP)$$
+Where:
+- $f_{spatial}$ is a tensor product (te) constructed from marginal splines with basis dimension $k=8$ for pass depth ($x_{depth}$), transverse field location ($y_{land}$), and line of scrimmage ($x_{los}$). Pass depth is dynamically calculated relative to the line of scrimmage: $x_{depth} = x_{land} - x_{los}$.  
+- $f_{context}$ is a one-dimensional smooth (s) of the pre-play $PreEP$ with basis dimension $k=15$.  
+
+To robustly handle heavy-tailed residuals generated by structural edge cases (specifically low-frequency, explosive touchdown plays where the localized EP strictly jumps to 6) the model is fit using a Scaled t-distribution (scat) with an identity link function. Utilizing a heavy-tailed distribution prevents these extreme scoring outliers from aggressively pulling the spline bases and distorting the general route-value surface.  
+
+### Yield and Expected Points Added ($xEPA$)
+
+The continuous expected value surface is generated by interpolating predictions across a 0.5-yard resolution grid. The model actively bounds the evaluation space by masking out impossible spatial geometries, dropping any coordinates that land beyond the back of the endzone ($x_{los} + x_{depth} \le 110$).
+
+To isolate the expected spatial Expected Points Added ($xEPA$) at any specific grid coordinate, the average $PreEP$ of the play context is subtracted from the model's predicted $PostEP$:
+  $$xEPA(x, y) = \mathbb{E}[PostEP] - \overline{PreEP}$$
+By combining this continuous $xEPA$ surface with the kinematic pitch control matrices, the expected value of a receiver's spatial control can be evaluated on a frame-by-frame basis throughout the route.
+
+## 3.3 Reasonable Pass Bounds
+
+
 ## 3.4 Dangerous Viable Space (DVS) 
+
+Dangerous Viable Space (DVS) represents the mathematical synthesis of the kinematic field control model and the continuous expected points surface. To calculate the localized threat generated by a receiver at any discrete field coordinate $(x, y)$, the framework computes a combined metric integrating spatial ownership with the intrinsic expected scoring value of that specific location.
+
+This framework forgoes the direct linear multiplication of spatial Expected Points Added ($xEPA$) and offensive Pitch Control Probability ($PPCF_{att}$) utilized in prior models such as $Illuminating the Defense$ (Subbaiah et al., 2021). Instead, the model applies a specific non-linear transformation to better capture the risk-reward dynamics of NFL passing windows. The raw spatial efficiency at each grid cell is modeled as:
+
+  $$DVS(x, y) = \text{sign}(xEPA) \cdot \sqrt{\vert{}xEPA\vert{}} \cdot PPCF_{att}^2$$
+  
+Taking the square root of the absolute $xEPA$ dampens extreme fluctuations in deep-field point values, while squaring the offensive control probability ($PPCF_{att}$) aggressively penalizes heavily contested or weakly controlled space. This transformation strictly rewards receivers who establish dominant leverage in positive-value areas rather than receivers who are in high-value locations with little spatial control. To ensure the metric strictly evaluates downfield route-running threat, DVS is subjected to rigid spatial masking. Any calculated efficiency value located behind the quarterback's dropback position is zeroed out, preventing lateral or backward movement behind the line of scrimmage from artificially deflating a receiver's spatial score.
+
+With the continuous DVS surface established, these cellular values are aggregated to evaluate route execution dynamically across time. For any given frame $t$ during the pre-pass phase, the receiver's aggregate Frame Efficiency (Frame DVS) is calculated by summing the DVS values across all valid spatial cells within the targeted evaluation zone:
+
+$$Frame DVS_t = \sum_{(x,y) \in \text{Target Zone}} DVS(x, y, t)$$
+
+From this continuous array of frame-level threat generation, the model extracts two primary play-level evaluation metrics to quantify route-running proficiency independent of quarterback targets:  
+
+- **Average Route Threat Efficiency (aRTE)**: Calculated as the mean Frame DVS across all analyzed pre-pass frames. This metric quantifies a receiver’s baseline ability to sustain high-value spatial control throughout the entire duration of a route's development.  
+- **Maximum Route Threat Efficiency (mRTE)**: Isolated as the peak (maximum) Frame DVS achieved at any point during the pre-pass lifecycle. This captures a receiver's peak window-creation ability, measuring their capacity to generate explosive threat at the optimal timing of a play

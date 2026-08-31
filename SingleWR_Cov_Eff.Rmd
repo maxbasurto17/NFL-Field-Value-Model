@@ -82,7 +82,11 @@ extract_frame_data <- function(nfl_df, target_game, target_play, target_frame) {
 # SECTION 3 — KINEMATICS & BALL FLIGHT (NFL TUNED)
 # =============================================================================
 
-player_time_to_intercept <- function(player, target_x, target_y, vmax = 11.0, acceleration = 8.0) {
+player_time_to_intercept <- function(player, target_x, target_y, default_vmax = 11.0, default_accel = 8.0) {
+  # Extract dynamic player bounds if present, otherwise fall back to default scalars
+  vmax <- if (!is.null(player$vmax)) player$vmax else default_vmax
+  acceleration <- if (!is.null(player$acceleration)) player$acceleration else default_accel
+
   p0 <- c(player$x, player$y)
   v0_vec <- c(player$vx, player$vy)
   
@@ -98,6 +102,7 @@ player_time_to_intercept <- function(player, target_x, target_y, vmax = 11.0, ac
   v0_proj <- v0_vec[1] * unit_x + v0_vec[2] * unit_y
   v0_proj <- pmin(v0_proj, vmax)
   
+  # Compute time to reach target using player-specific acceleration and max speed
   t_acc <- (vmax - v0_proj) / acceleration
   d_acc <- (v0_proj * t_acc) + (0.5 * acceleration * (t_acc^2))
   
@@ -105,10 +110,10 @@ player_time_to_intercept <- function(player, target_x, target_y, vmax = 11.0, ac
   if (is.null(dim(distances))) tti <- numeric(length(distances))
   
   acc_phase_mask <- d_acc >= distances
-  acc_phase_mask[is.na(acc_phase_mask)] <- FALSE # Safeguard against NA
+  acc_phase_mask[is.na(acc_phase_mask)] <- FALSE 
   
   cruise_phase_mask <- !acc_phase_mask
-  cruise_phase_mask[is.na(cruise_phase_mask)] <- FALSE # Safeguard against NA
+  cruise_phase_mask[is.na(cruise_phase_mask)] <- FALSE 
   
   sqrt_term <- pmax(v0_proj^2 + 2 * acceleration * distances, 0)
   
@@ -168,14 +173,15 @@ control_rate <- function(t, tti, lambda_j = 3.99, tti_sigma = 0.54) {
   return(P * lambda_j)
 }
 
-nfl_dynamic_pitch_control <- function(attacking_players, defending_players, qb_pos, grid_x, grid_y, in_target_zone,
-                                      dt = 0.05, max_time = 8.0, vmax = 11.0, acceleration = 8.0,
+nfl_dynamic_pitch_control <- function(attacking_players, defending_players, qb_pos, grid_x, grid_y, in_target_zone = NULL,
+                                      dt = 0.05, max_time = 8.0,
                                       lambda_att = 3.99, kappa = 1.72, tti_sigma = 0.54) {
   
   lambda_def <- lambda_att * kappa
   
-  TTI_att <- lapply(attacking_players, function(p) player_time_to_intercept(p, grid_x, grid_y, vmax, acceleration))
-  TTI_def <- lapply(defending_players, function(p) player_time_to_intercept(p, grid_x, grid_y, vmax, acceleration))
+  # Calculate TTI using each player's individual vmax and acceleration parameters
+  TTI_att <- lapply(attacking_players, function(p) player_time_to_intercept(p, grid_x, grid_y))
+  TTI_def <- lapply(defending_players, function(p) player_time_to_intercept(p, grid_x, grid_y))
   
   T_ball <- football_travel_time(qb_pos$x, qb_pos$y, grid_x, grid_y, attacking_players)
   
@@ -189,8 +195,10 @@ nfl_dynamic_pitch_control <- function(attacking_players, defending_players, qb_p
     active <- t >= T_ball
     if (!any(active)) next
     
-    # Restrict mathematical loop to active, uncontrolled cells inside the target ellipse
-    calc_mask <- active & (PPCF_tot < 0.999) & in_target_zone
+    calc_mask <- active & (PPCF_tot < 0.999)
+    if (!is.null(in_target_zone)) {
+      calc_mask <- calc_mask & in_target_zone
+    }
     if (!any(calc_mask)) next
     
     rate_att_cells <- lapply(TTI_att, function(tti_mat) control_rate(t, tti_mat[calc_mask], lambda_att, tti_sigma))
@@ -230,7 +238,7 @@ library(quantreg)
 library(splines)
 
 # =============================================================================
-# 1. UPSTREAM DATA FILTERING & SPLINE MODEL PRE-COMPUTATION
+# 1. UPSTREAM ATHLETIC PROFILES & DATA FILTERING
 # =============================================================================
 WR_id_find <- full_df %>%
   filter(player_name == 'Mike Evans') %>% 
@@ -239,9 +247,25 @@ WR_id_find <- full_df %>%
 
 target_receiver_id <- 41233  # Replace with actual target nfl_id if needed
 
+message("Computing player-specific athletic profiles (vmax and acceleration)...")
+
+# Pre-compute dynamic top speed and max acceleration per player
+player_athletic_profiles <- full_df %>%
+  filter(!is.na(nfl_id), !is.na(s)) %>%
+  group_by(nfl_id) %>%
+  summarize(
+    vmax = quantile(s, 0.99, na.rm = TRUE),
+    acceleration = if ("a" %in% names(.)) quantile(a, 0.99, na.rm = TRUE) else 8.0,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    vmax = pmax(pmin(vmax, 12.5), 7.0),
+    acceleration = pmax(pmin(acceleration, 10.0), 5.0)
+  )
+
 message("Optimizing upstream data structure...")
 
-# Filter relevant plays and players first
+# Filter relevant plays/players and attach dynamic kinematic bounds
 optimized_df <- full_df %>%
   filter(phase == "pre_pass", !is.na(nfl_id)) %>%
   group_by(game_id, play_id) %>%
@@ -251,6 +275,11 @@ optimized_df <- full_df %>%
     tolower(player_side) == "defense" | 
     nfl_id == target_receiver_id | 
     tolower(player_position) == "qb"
+  ) %>%
+  left_join(player_athletic_profiles, by = "nfl_id") %>%
+  mutate(
+    vmax = coalesce(vmax, 11.0),
+    acceleration = coalesce(acceleration, 8.0)
   )
 
 message("Applying spline model pre-computation vector-wide...")
@@ -311,10 +340,19 @@ process_single_play <- function(play_data, output_dir, target_wr_id = NULL) {
     offense_df <- frame_data %>% filter(player_side == "offense")
     defense_df <- frame_data %>% filter(player_side == "defense")
     
+    # Updated helper to include dynamic player bounds
     to_player_list <- function(df) {
       if (nrow(df) == 0) return(list())
       lapply(1:nrow(df), function(i) {
-        list(id = df$nfl_id[i], x = df$x_std[i], y = df$y_std[i], vx = df$vx[i], vy = df$vy[i])
+        list(
+          id = df$nfl_id[i], 
+          x = df$x_std[i], 
+          y = df$y_std[i], 
+          vx = df$vx[i], 
+          vy = df$vy[i],
+          vmax = df$vmax[i],
+          acceleration = df$acceleration[i]
+        )
       })
     }
     
@@ -461,7 +499,7 @@ plot_nfl_pitch_control_anim <- function(play_results) {
       alpha = 0.65
     ) +
     scale_fill_gradient2(
-      low = "white", high = "#b91c1c", 
+      low = "white", mid = "pink", high = "#b91c1c", 
       midpoint = 0.5, limits = c(0, 1), 
       name = "Offense\nControl Prob"
     ) +
