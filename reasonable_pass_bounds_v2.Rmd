@@ -7,18 +7,7 @@ output: html_document
 
 ```{r}
 
-# Libraries
 library(tidyverse)
-
-# Data
-main <- read_csv("~/Documents/Sports Analytics/2026 CMSAC RRC/full_data.csv")
-
-```
-
-# Bounds Calculation
-
-```{r}
-
 library(dplyr)
 library(tidyr)
 library(purrr)
@@ -27,14 +16,22 @@ library(scales)
 library(sf)
 library(gganimate)
 library(patchwork)
+library(future)
+library(furrr)
 
+main <- read_csv("~/Documents/Football_R/CMSAC--Field Value/full_data.csv")
+
+```
+
+# Bounds Calculation
+
+```{r}
 # =============================================================================
 # 0. CONFIG 
 # =============================================================================
 
 INPUT_PHASE_VALUES <- c("pre_pass") # ONLY pre-pass frames used
-VALID_PASS_RESULTS <- c("C") # Include incomplete passes to avoid target bias
-FRAME_RATE_HZ      <- 10 # Standard NGS tracking frame rate (10 fps)
+VALID_PASS_RESULTS <- c("C") # Filter to completed passes to establish reasonable bounds
 
 # Lookahead evaluation horizon grid (frames ahead to project/evaluate)
 frames_ahead_grid <- seq(5, 30, by = 5) 
@@ -44,62 +41,21 @@ frames_ahead_grid <- seq(5, 30, by = 5)
 # =============================================================================
 
 frame_col <- intersect(c("frame_id", "frameId", "frame", "frame_number"), names(main))[1]
-pos_col   <- intersect(c("player_position", "position", "officialPosition"), names(main))[1]
 
-los_col <- "los_x_std"
-
-if (is.na(los_col)) {
-  stop("Could not auto-detect Line of Scrimmage column. Set `los_col <- 'column_name'` manually.")
-}
-
-# Filter strictly to pre_pass tracking data
-main_prepass <- main %>%
-  filter(phase %in% INPUT_PHASE_VALUES) %>%
-  arrange(game_id, play_id, nfl_id, .data[[frame_col]]) %>%
-  group_by(game_id, play_id, nfl_id) %>%
-  mutate(global_frame = row_number()) %>%
-  ungroup()
-
-# Identify the distribution of the pass depth using final pre pass location
-pass_depth_df <- main_prepass %>%
+# Filter pre-pass and valid targets, find throw frame, and calculate route depth relative to LOS
+throw_frames_raw <- main %>%
   filter(
+    phase %in% INPUT_PHASE_VALUES,
     player_role == "Targeted Receiver",
     pass_result %in% VALID_PASS_RESULTS,
-    play_nullified_by_penalty == "N"
+    play_nullified_by_penalty == "N",
+    !is.na(x_std), !is.na(y_std), !is.na(nfl_id)
   ) %>%
   group_by(game_id, play_id, nfl_id) %>%
   summarise(
-    throw_frame     = max(global_frame),
-    anchor_x        = x_std[global_frame == max(global_frame)],
-    los_x_std       = first(los_x_std), 
-    .groups = "drop"
-  ) %>%
-  filter(
-    !is.na(anchor_x), !is.na(los_x_std)
-  ) %>%
-  mutate(
-    route_depth_yds = anchor_x - los_x_std,
-  ) %>%
-  select(route_depth_yds)
-
-depth_std_dev <- sd(pass_depth_df$route_depth_yds, na.rm = TRUE)
-depth_mean <- mean(pass_depth_df$route_depth_yds, na.rm = TRUE)
-plus1_std_dev <- depth_mean + depth_std_dev
-minus1_std_dev <- depth_mean - depth_std_dev
-
-# Filter plays with valid coordinates and compute LOS depth
-throw_frames <- main_prepass %>%
-  filter(
-    player_role == "Targeted Receiver",
-    pass_result %in% VALID_PASS_RESULTS,
-    play_nullified_by_penalty == "N"
-  ) %>%
-  group_by(game_id, play_id, nfl_id) %>%
-  summarise(
-    throw_frame     = max(global_frame),
-    anchor_x        = x_std[global_frame == max(global_frame)],
-    anchor_y        = y_std[global_frame == max(global_frame)],
-    max_x_prepass   = max(x_std, na.rm = TRUE),
+    throw_frame     = max(frame_id, na.rm = TRUE),
+    anchor_x        = first(x_std[frame_id == max(frame_id, na.rm = TRUE)]),
+    anchor_y        = first(y_std[frame_id == max(frame_id, na.rm = TRUE)]),
     los_x_std       = first(los_x_std),
     ball_land_x_std = first(ball_land_x_std),
     ball_land_y_std = first(ball_land_y_std),
@@ -109,9 +65,17 @@ throw_frames <- main_prepass %>%
     !is.na(ball_land_x_std), !is.na(ball_land_y_std),
     !is.na(anchor_x), !is.na(anchor_y), !is.na(los_x_std)
   ) %>%
+  mutate(route_depth_yds = anchor_x - los_x_std)
+
+# Compute bounds and assign depth bins dynamically based on release depth
+depth_std_dev  <- sd(throw_frames_raw$route_depth_yds, na.rm = TRUE)
+depth_mean     <- mean(throw_frames_raw$route_depth_yds, na.rm = TRUE)
+plus1_std_dev  <- depth_mean + depth_std_dev
+minus1_std_dev <- depth_mean - depth_std_dev
+
+throw_frames <- throw_frames_raw %>%
   mutate(
-    route_depth_yds = anchor_x - los_x_std,
-    pass_depth_bin  = cut(
+    pass_depth_bin = cut(
       route_depth_yds, 
       breaks = c(-Inf, minus1_std_dev, plus1_std_dev, Inf),
       labels = c("Short", "Medium", "Deep")
@@ -123,37 +87,36 @@ cat("Valid plays available for calibration:", nrow(throw_frames), "\n")
 stopifnot("No valid plays found in pre_pass dataset." = nrow(throw_frames) > 0)
 
 # =============================================================================
-# 2. Geometry Builder with Conditional Last-Movement Extrapolation
+# 2. Geometry Builder with Pre-Computed Path Points
 # =============================================================================
 
-full_route_path <- main_prepass %>%
-  select(game_id, play_id, nfl_id, global_frame, x_std, y_std) %>%
+path_pts <- main %>%
+  filter(
+    phase %in% INPUT_PHASE_VALUES,
+    !is.na(x_std), !is.na(y_std)
+  ) %>%
   inner_join(
     throw_frames %>% select(game_id, play_id, nfl_id, throw_frame),
     by = c("game_id", "play_id", "nfl_id")
   ) %>%
-  filter(global_frame <= throw_frame) %>%
-  arrange(game_id, play_id, nfl_id, global_frame) %>%
-  distinct(game_id, play_id, nfl_id, global_frame, .keep_all = TRUE)
+  filter(.data[[frame_col]] <= throw_frame) %>%
+  arrange(game_id, play_id, nfl_id, frame_id) %>%
+  distinct(game_id, play_id, nfl_id, frame_id, .keep_all = TRUE) %>%
+  group_by(game_id, play_id, nfl_id) %>%
+  summarise(
+    px = list(x_std), 
+    py = list(y_std), 
+    .groups = "drop"
+  )
+
+base_geom_df <- throw_frames %>%
+  inner_join(path_pts, by = c("game_id", "play_id", "nfl_id"))
 
 build_path_geometry <- function(n_frames_ahead) {
+  if (nrow(base_geom_df) == 0) return(NULL)
 
-  path_pts <- full_route_path %>%
-    arrange(game_id, play_id, nfl_id, global_frame) %>%
-    group_by(game_id, play_id, nfl_id) %>%
-    summarise(
-      px = list(x_std), 
-      py = list(y_std), 
-      .groups = "drop"
-    )
-
-  df <- throw_frames %>%
-    inner_join(path_pts, by = c("game_id", "play_id", "nfl_id"))
-
-  if (nrow(df) == 0) return(NULL)
-
-  pmap_dfr(df, function(game_id, play_id, nfl_id, anchor_x, anchor_y,
-                        ball_land_x_std, ball_land_y_std, px, py, ...) {
+  pmap_dfr(base_geom_df, function(game_id, play_id, nfl_id, pass_depth_bin, anchor_x, anchor_y,
+                                  ball_land_x_std, ball_land_y_std, px, py, ...) {
 
     path_x <- unlist(px)
     path_y <- unlist(py)
@@ -161,7 +124,7 @@ build_path_geometry <- function(n_frames_ahead) {
     
     if (n_pts < 2) return(NULL) 
 
-    # 1. Compute velocity vector from last movement step (frame n-1 to n)
+    # 1. Compute velocity vector from last movement step
     dx_last <- path_x[n_pts] - path_x[n_pts - 1]
     dy_last <- path_y[n_pts] - path_y[n_pts - 1]
     step_speed <- sqrt(dx_last^2 + dy_last^2)
@@ -173,8 +136,7 @@ build_path_geometry <- function(n_frames_ahead) {
 
     # 3. Target distance to the forward projection line segment
     bx <- ball_land_x_std; by <- ball_land_y_std
-    seg_dx <- extrap_x - anchor_x
-    seg_dy <- extrap_y - anchor_y
+    seg_dx <- extrap_x - anchor_x; seg_dy <- extrap_y - anchor_y
     denom  <- seg_dx^2 + seg_dy^2
 
     t <- if (denom > 0) pmin(pmax(((bx - anchor_x) * seg_dx + (by - anchor_y) * seg_dy) / denom, 0), 1) else 0
@@ -191,40 +153,25 @@ build_path_geometry <- function(n_frames_ahead) {
     back_perp  <- sqrt(pmax(vx0^2 + vy0^2 - back_along^2, 0))
 
     tibble(
-      game_id    = game_id, 
-      play_id    = play_id, 
-      nfl_id     = nfl_id,
-      min_dist   = dist, 
-      arc_along  = arc_along,
-      proj_len   = proj_len,      # ONLY projected forward length from throw
-      back_along = back_along, 
-      back_perp  = back_perp
+      game_id = game_id, play_id = play_id, nfl_id = nfl_id,
+      pass_depth_bin = pass_depth_bin,
+      min_dist = dist, arc_along = arc_along, proj_len = proj_len, 
+      back_along = back_along, back_perp = back_perp
     )
   })
 }
 
 # =============================================================================
-# 3. Dynamic Envelope Evaluation (Duplicate-Safe)
+# 3. Dynamic Envelope Evaluation 
 # =============================================================================
 
 evaluate_bw <- function(geom, backward_cushion, corridor_width, frames_ahead) {
-  
-  if (!"pass_depth_bin" %in% names(geom)) {
-    geom <- geom %>%
-      inner_join(
-        throw_frames %>% select(game_id, play_id, nfl_id, pass_depth_bin), 
-        by = c("game_id", "play_id", "nfl_id")
-      )
-  }
-
-  geom <- geom %>%
+  geom %>%
     mutate(
       in_forward_tube  = min_dist <= corridor_width & arc_along >= 0 & arc_along <= proj_len,
       in_backward_zone = back_along >= 0 & back_along <= backward_cushion & back_perp <= corridor_width,
       inside           = in_forward_tube | in_backward_zone
-    )
-
-  geom %>%
+    ) %>%
     group_by(pass_depth_bin) %>%
     summarise(
       backward_cushion = backward_cushion,
@@ -239,60 +186,32 @@ evaluate_bw <- function(geom, backward_cushion, corridor_width, frames_ahead) {
 }
 
 # =============================================================================
-# 4 & 5. Grid Search & Working Point Calibration (Depth-Stratified)
+# 4 & 5. Parallel Grid Search & Working Point Calibration
 # =============================================================================
 
-frames_ahead_grid <- seq(5, 35, by = 5)
-geom_by_n <- setNames(purrr::map(frames_ahead_grid, build_path_geometry), frames_ahead_grid)
+plan(multisession, workers = availableCores() - 1)
+geom_by_n <- setNames(future_map(frames_ahead_grid, build_path_geometry, .options = furrr_options(seed = TRUE)), frames_ahead_grid)
 
-# Define depth-specific parameter search grids
-grid_short <- expand.grid(
-  target_bin       = "Short",
-  backward_cushion = seq(0, 3, by = 0.5),
-  corridor_width   = seq(1, 6, by = 0.5),
-  frames_ahead     = seq(5, 15, by = 5),
-  stringsAsFactors = FALSE
-)
-
-grid_medium <- expand.grid(
-  target_bin       = "Medium",
-  backward_cushion = seq(0, 3, by = 0.5),
-  corridor_width   = seq(1, 6, by = 0.5),
-  frames_ahead     = seq(10, 25, by = 5),
-  stringsAsFactors = FALSE
-)
-
-grid_deep <- expand.grid(
-  target_bin       = "Deep",
-  backward_cushion = seq(0, 3, by = 0.5),
-  corridor_width   = seq(1, 6, by = 0.5),
-  frames_ahead     = seq(15, 35, by = 5),
-  stringsAsFactors = FALSE
-)
+grid_short  <- expand.grid(target_bin = "Short", backward_cushion = seq(0, 3, by = 0.5), corridor_width = seq(1, 6, by = 0.5), frames_ahead = seq(5, 15, by = 5), stringsAsFactors = FALSE)
+grid_medium <- expand.grid(target_bin = "Medium", backward_cushion = seq(0, 3, by = 0.5), corridor_width = seq(1, 6, by = 0.5), frames_ahead = seq(10, 25, by = 5), stringsAsFactors = FALSE)
+grid_deep   <- expand.grid(target_bin = "Deep", backward_cushion = seq(0, 3, by = 0.5), corridor_width = seq(1, 6, by = 0.5), frames_ahead = seq(15, 30, by = 5), stringsAsFactors = FALSE)
 
 param_grid <- bind_rows(grid_short, grid_medium, grid_deep)
 
-# Run Grid Search
-results <- pmap_dfr(param_grid, function(target_bin, backward_cushion, corridor_width, frames_ahead) {
+results <- future_pmap_dfr(param_grid, function(target_bin, backward_cushion, corridor_width, frames_ahead) {
   geom <- geom_by_n[[as.character(frames_ahead)]]
   if (is.null(geom) || nrow(geom) == 0) return(NULL)
   
-  # Join pass_depth_bin cleanly and filter to current depth bin
-  geom_bin <- geom %>%
-    inner_join(
-      throw_frames %>% select(game_id, play_id, nfl_id, pass_depth_bin), 
-      by = c("game_id", "play_id", "nfl_id")
-    ) %>%
-    filter(as.character(pass_depth_bin) == target_bin)
-    
+  geom_bin <- geom %>% filter(as.character(pass_depth_bin) == target_bin)
   if (nrow(geom_bin) == 0) return(NULL)
   
   evaluate_bw(geom_bin, backward_cushion, corridor_width, frames_ahead)
-})
+}, .options = furrr_options(seed = TRUE))
+
+plan(sequential)
 
 target_coverage <- 0.90
 
-# Select optimal parameters reaching target coverage per bin
 best_per_bin <- results %>% 
   filter(coverage >= target_coverage) %>% 
   group_by(pass_depth_bin) %>% 
@@ -300,7 +219,6 @@ best_per_bin <- results %>%
   slice(1) %>% 
   ungroup()
 
-# Fallback mechanism if target coverage is unreachable
 all_bins <- c("Short", "Medium", "Deep")
 missing_bins <- setdiff(all_bins, as.character(best_per_bin$pass_depth_bin))
 
@@ -311,21 +229,17 @@ if (length(missing_bins) > 0) {
     arrange(desc(coverage), area) %>%
     slice(1) %>%
     ungroup()
-    
   best_per_bin <- bind_rows(best_per_bin, fallback_bins)
 }
 
-# Enforce Monotonicity (Corridor width cannot shrink as route depth increases)
 best_per_bin <- best_per_bin %>%
   mutate(pass_depth_bin = factor(pass_depth_bin, levels = all_bins)) %>%
   arrange(pass_depth_bin) %>%
-  mutate(
-    corridor_width = cummax(corridor_width)
-  )
+  mutate(corridor_width = cummax(corridor_width))
 
-cat("\n=== STRATIFIED OPTIMAL PARAMETERS (MONOTONIC & CONDITIONAL) ===\n")
+cat("\n=== STRATIFIED OPTIMAL PARAMETERS (MONOTONIC) ===\n")
 print(best_per_bin %>% select(pass_depth_bin, backward_cushion, corridor_width, frames_ahead, coverage, area))
-cat("===============================================================\n\n")
+cat("=================================================\n\n")
 
 # =============================================================================
 # 6. Robustness Check & Depth Bin Plotting
@@ -337,7 +251,7 @@ all_geoms <- bind_rows(lapply(names(geom_by_n), function(f_ahead) {
 
 play_results <- throw_frames %>%
   inner_join(best_per_bin, by = "pass_depth_bin") %>%
-  inner_join(all_geoms, by = c("game_id", "play_id", "nfl_id", "frames_ahead")) %>%
+  inner_join(all_geoms, by = c("game_id", "play_id", "nfl_id", "frames_ahead", "pass_depth_bin")) %>%
   mutate(
     in_forward_tube  = min_dist <= corridor_width & arc_along >= 0 & arc_along <= proj_len,
     in_backward_zone = back_along >= 0 & back_along <= backward_cushion & back_perp <= corridor_width,
@@ -347,65 +261,25 @@ play_results <- throw_frames %>%
 coverage_by_depth <- play_results %>%
   group_by(pass_depth_bin) %>%
   summarise(
-    total_plays     = n(),
-    opt_width       = mean(corridor_width),
-    opt_cushion     = mean(backward_cushion),
-    coverage_pct    = mean(inside),
-    mean_area       = mean(area),
-    .groups         = "drop"
+    total_plays    = n(),
+    opt_width      = mean(corridor_width),
+    opt_cushion    = mean(backward_cushion),
+    coverage_pct   = mean(inside),
+    mean_area      = mean(area),
+    .groups        = "drop"
   )
 
 print(coverage_by_depth)
 
-plot_depth <- ggplot(coverage_by_depth, aes(x = pass_depth_bin, y = coverage_pct, fill = pass_depth_bin)) +
-  geom_col(show.legend = FALSE, alpha = 0.8) +
-  geom_text(aes(label = scales::percent(coverage_pct, accuracy = 0.1)), vjust = -0.5, fontface = "bold") +
-  geom_hline(yintercept = target_coverage, linetype = "dashed", color = "red") +
-  scale_y_continuous(labels = scales::percent_format(), limits = c(0, 1.05)) +
-  labs(
-    title = "Class-Balanced Target Envelope Coverage (Forward Area Only)",
-    subtitle = "Projection evaluated strictly on forward trajectory from release point",
-    x = "Route Depth at Release Relative to LOS (Yards)",
-    y = "Coverage Rate"
-  ) +
-  theme_minimal()
-
-print(plot_depth)
-
 # =============================================================================
-# 7. Pre-Pass Animation with Conditional Frame-by-Frame Extrapolation
+# 7. Pre-Pass Animation Helper Fix
 # =============================================================================
-
-sample_play_info <- throw_frames %>% head(1)
-sample_game   <- sample_play_info$game_id
-sample_play   <- sample_play_info$play_id
-sample_target <- sample_play_info$nfl_id
-sample_bin    <- sample_play_info$pass_depth_bin
-
-sample_params <- best_per_bin %>% filter(pass_depth_bin == sample_bin)
-
-dyn_b <- if (nrow(sample_params) > 0) sample_params$backward_cushion[1] else 1.0
-dyn_w <- if (nrow(sample_params) > 0) sample_params$corridor_width[1]    else 3.0
-dyn_f <- if (nrow(sample_params) > 0) sample_params$frames_ahead[1]      else 15
-
-target_path <- main_prepass %>%
-  filter(
-    game_id == sample_game, 
-    play_id == sample_play, 
-    nfl_id == sample_target,
-    !is.na(x_std), !is.na(y_std)
-  ) %>%
-  arrange(global_frame) %>%
-  distinct(global_frame, .keep_all = TRUE)
 
 get_frame_polygon <- function(player_path, current_frame, backward_cushion, corridor_width, frames_ahead) {
   
-  # ---------------------------------------------------------
-  # 1. Backwards Cushion (Instantaneous Vector at Current Frame)
-  # ---------------------------------------------------------
   route_up_to_current <- player_path %>%
-    filter(global_frame <= current_frame, !is.na(x_std), !is.na(y_std)) %>%
-    arrange(global_frame)
+    filter(frame_id <= current_frame) %>%
+    arrange(frame_id)
   
   if (nrow(route_up_to_current) < 2) return(NULL)
   
@@ -422,33 +296,22 @@ get_frame_polygon <- function(player_path, current_frame, backward_cushion, corr
   ux_curr <- if (step_speed_curr > 1e-4) dx_curr / step_speed_curr else 0
   uy_curr <- if (step_speed_curr > 1e-4) dy_curr / step_speed_curr else 0
   
-  # Point extending backward from current position
   back_pt <- c(curr_pt[1] - ux_curr * backward_cushion, curr_pt[2] - uy_curr * backward_cushion)
   
-  # ---------------------------------------------------------
-  # 2. Forward Projection (Use Actual Frames if Available)
-  # ---------------------------------------------------------
   target_end_frame <- current_frame + frames_ahead
-  max_avail_frame  <- max(player_path$global_frame)
+  max_avail_frame  <- max(player_path$frame_id, na.rm = TRUE)
   actual_end_frame <- min(max_avail_frame, target_end_frame)
   
-  # Grab actual coordinates from current frame up to the limit
   future_route <- player_path %>%
-    filter(global_frame >= current_frame, global_frame <= actual_end_frame, !is.na(x_std), !is.na(y_std)) %>%
-    arrange(global_frame)
+    filter(frame_id >= current_frame, frame_id <= actual_end_frame) %>%
+    arrange(frame_id)
     
   coords_future <- as.matrix(future_route[, c("x_std", "y_std")])
-  
-  # Start building the linestring coordinates: Back point + Actual Future Path
   poly_coords <- rbind(back_pt, coords_future)
   
-  # ---------------------------------------------------------
-  # 3. Conditional Extrapolation (If we run out of actual frames)
-  # ---------------------------------------------------------
   frames_short <- target_end_frame - actual_end_frame
   
   if (frames_short > 0 && nrow(coords_future) >= 2) {
-    # Calculate velocity based strictly on the LAST available movement
     n_pts_fut      <- nrow(coords_future)
     last_pt        <- coords_future[n_pts_fut, ]
     second_last_pt <- coords_future[n_pts_fut - 1, ]
@@ -456,19 +319,14 @@ get_frame_polygon <- function(player_path, current_frame, backward_cushion, corr
     dx_last <- last_pt[1] - second_last_pt[1]
     dy_last <- last_pt[2] - second_last_pt[2]
     
-    # Project forward the remaining missing frames
     extrap_pt <- c(last_pt[1] + dx_last * frames_short, last_pt[2] + dy_last * frames_short)
-    
     poly_coords <- rbind(poly_coords, extrap_pt)
   }
   
-  # ---------------------------------------------------------
-  # 4. Generate the Envelope Buffer
-  # ---------------------------------------------------------
   line_sf <- st_sfc(st_linestring(poly_coords))
   poly_sf <- st_buffer(line_sf, dist = corridor_width, endCapStyle = "ROUND", joinStyle = "ROUND")
   
-  tibble(global_frame = current_frame, geometry = poly_sf)
+  tibble(frame_id = current_frame, geometry = poly_sf)
 }
 
 # =============================================================================
@@ -499,7 +357,6 @@ p_res_vs_depth <- ggplot(residual_data, aes(x = route_depth_yds, y = perp_residu
   geom_smooth(method = "loess", color = "darkblue", se = TRUE) +
   labs(
     title = "A. Lateral Route Residuals vs. LOS Depth",
-    subtitle = "Dashed line = Dynamic Corridor Width per pass depth bin",
     x = "Route Depth at Release Relative to LOS (Yards)",
     y = "Perpendicular Distance Error (Yards)"
   ) +
@@ -512,7 +369,6 @@ p_res_density <- ggplot(residual_data, aes(x = perp_residual)) +
              linetype = "dashed", linewidth = 0.8, show.legend = FALSE) +
   labs(
     title = "B. Distribution of Lateral Errors",
-    subtitle = "Dashed lines = Optimal corridor widths for respective depth bins",
     x = "Perpendicular Error (Yards)",
     y = "Density"
   ) +
@@ -523,7 +379,6 @@ p_qq <- ggplot(residual_data, aes(sample = linear_fit_res)) +
   stat_qq_line(color = "firebrick", linetype = "dashed") +
   labs(
     title = "C. Normal Q-Q Plot of Model Residuals",
-    subtitle = "Evaluates heavy-tail error behavior across off-target throws",
     x = "Theoretical Quantiles",
     y = "Sample Quantiles"
   ) +
@@ -538,7 +393,6 @@ p_long_res <- ggplot(residual_data, aes(x = route_depth_yds, y = long_residual, 
   ) +
   labs(
     title = "D. Longitudinal Residuals relative to LOS",
-    subtitle = "Positive = Target landed past pre-throw route length | Negative = Target landed short",
     x = "Route Depth Relative to LOS (Yards)",
     y = "Longitudinal Residual (Yards)"
   ) +
@@ -547,61 +401,53 @@ p_long_res <- ggplot(residual_data, aes(x = route_depth_yds, y = long_residual, 
 
 residual_diagnostics <- (p_res_vs_depth | p_res_density) / (p_qq | p_long_res) +
   plot_annotation(
-    title = "Pre-Pass Target Envelope Residual Diagnostics",
-    subtitle = "Corridor widths, cushions, and dynamic projections calibrated strictly from pre-throw tracking data."
+    title = "Pre-Pass Target Envelope Residual Diagnostics"
   )
 
 print(residual_diagnostics)
-
 
 ```
 
 # Save Files
 
 ```{r}
-
-# Save the optimal parameters table generated in your calibration script
-saveRDS(best_per_bin, "optimal_envelope_parameters.rds")
-
+# =============================================================================
+# Save Files & Export Model Object
+# =============================================================================
+envelope_model <- list(
+  parameters = best_per_bin %>% select(pass_depth_bin, backward_cushion, corridor_width, frames_ahead),
+  breaks     = c(-Inf, minus1_std_dev, plus1_std_dev, Inf),
+  labels     = c("Short", "Medium", "Deep")
+)
+saveRDS(envelope_model, "optimal_envelope_parameters.rds")
 ```
 
 # Code for Other File
 
 ```{r}
-
+# =============================================================================
+# Testing the Export on New Tracking Data
+# =============================================================================
 library(dplyr)
 
-# 1. Load the pre-calibrated parameters
-optimal_params <- readRDS("optimal_envelope_parameters.rds") %>%
-  select(pass_depth_bin, backward_cushion, corridor_width, frames_ahead)
+envelope_model <- readRDS("optimal_envelope_parameters.rds")
 
-# 2. Calculate receiver route depth on your new tracking dataset
-route_depths <- new_tracking_data %>%
-  # Filter down to the players you want to evaluate (e.g., all eligible receivers)
-  filter(player_role %in% c("Targeted Receiver", "Receiver")) %>%
+route_depths <- main %>%
+  # Filter to pre_pass so max(frame_id) targets the throw frame, matching calibration
+  filter(phase == "pre_pass", player_role %in% c("Targeted Receiver", "Receiver")) %>%
   group_by(game_id, play_id, nfl_id) %>%
   summarise(
-    # Get receiver X coordinate at the first frame (snap)
-    start_x = x_std[global_frame == min(global_frame)],
-    # Get receiver X coordinate at the final recorded frame of their route
-    end_x = x_std[global_frame == max(global_frame)],
-    .groups = "drop"
+    x_std     = first(x_std[frame_id == max(frame_id, na.rm = TRUE)]),
+    los_x_std = first(los_x_std),
+    .groups   = "drop"
   ) %>%
   mutate(
-    # Calculate vertical distance covered. abs() handles bidirectional play if not standardized,
-    # but assumes x_std is your longitudinal coordinate.
-    route_depth_yds = abs(end_x - start_x),
-    
-    # Map the depth to the exact same factor levels used in your calibration
+    pass_depth = x_std - los_x_std,
     pass_depth_bin = cut(
-      route_depth_yds, 
-      breaks = c(-Inf, 10, 20, 30, Inf),
-      labels = c("Short (<10 yds)", "Medium (10-20 yds)", "Deep (20-30 yds)", "Bomb (30+ yds)")
+      pass_depth, 
+      breaks = envelope_model$breaks,
+      labels = envelope_model$labels
     )
-  )
-
-# 3. Join the optimal parameters to the evaluated routes
-ready_for_pitch_control <- route_depths %>%
-  left_join(optimal_params, by = "pass_depth_bin")
-
+  ) %>%
+  left_join(envelope_model$parameters, by = "pass_depth_bin")
 ```

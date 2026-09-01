@@ -129,27 +129,25 @@ player_time_to_intercept <- function(player, target_x, target_y) {
   return(tti)
 }
 
-estimate_nfl_pass_bounds <- function(distances) {
+estimate_nfl_pass_bounds <- function(distances, pass_speed_max = 23.0, pass_speed_min = 14.0) {
   # Approximations for thrown footballs in yards
-  # Fast bullet pass ~ 23 yds/sec, high lob ~ 14 yds/sec
-  min_time <- distances / 23.0 
-  max_time <- distances / 14.0
+  min_time <- distances / pass_speed_max 
+  max_time <- distances / pass_speed_min
   return(list(min = pmax(min_time, 0.0), max = pmax(max_time, 0.0)))
 }
 
-football_travel_time <- function(qb_x, qb_y, target_x, target_y, attacking_players) {
+football_travel_time <- function(qb_x, qb_y, target_x, target_y, attacking_players, pass_speed_max = 23.0, pass_speed_min = 14.0) {
   dx <- target_x - qb_x
   dy <- target_y - qb_y
   distances <- sqrt(dx^2 + dy^2)
   
-  bounds <- estimate_nfl_pass_bounds(distances)
+  bounds <- estimate_nfl_pass_bounds(distances, pass_speed_max, pass_speed_min)
   
   tti_shape <- dim(target_x)
   if (is.null(tti_shape)) nearest_attacker_tti <- rep(Inf, length(target_x))
   else nearest_attacker_tti <- array(Inf, dim = tti_shape)
   
   for (player in attacking_players) {
-    # Skip if player is the QB (assumed to be the one throwing)
     if (abs(player$x - qb_x) < 0.1 && abs(player$y - qb_y) < 0.1) next
     
     player_tti <- player_time_to_intercept(player, target_x, target_y)
@@ -177,15 +175,16 @@ control_rate <- function(t, tti, lambda_j = 3.99, tti_sigma = 0.54) {
 
 nfl_dynamic_pitch_control <- function(attacking_players, defending_players, qb_pos, grid_x, grid_y,
                                        dt = 0.05, max_time = 8.0, lambda_att = 3.89, 
-                                       kappa = 1.18, tti_sigma = 0.67) {
+                                       kappa = 1.18, tti_sigma = 0.67, 
+                                       pass_speed_max = 23.0, pass_speed_min = 14.0) {
   
   lambda_def <- lambda_att * kappa
   
-  # Computes TTI passing each player object (containing its own vmax and acceleration)
   TTI_att <- lapply(attacking_players, function(p) player_time_to_intercept(p, grid_x, grid_y))
   TTI_def <- lapply(defending_players, function(p) player_time_to_intercept(p, grid_x, grid_y))
   
-  T_ball <- football_travel_time(qb_pos$x, qb_pos$y, grid_x, grid_y, attacking_players)
+  # Pass the parameterized speed limits into travel time function
+  T_ball <- football_travel_time(qb_pos$x, qb_pos$y, grid_x, grid_y, attacking_players, pass_speed_max, pass_speed_min)
   
   PPCF_att <- array(0.0, dim = dim(grid_x))
   PPCF_def <- array(0.0, dim = dim(grid_x))
@@ -303,6 +302,8 @@ fast_compute_predictions <- function(params, preprocessed_list) {
   l_att <- params[1]
   k_def <- params[2]
   s_tti <- params[3]
+  p_max <- params[4] # Optimized Max Pass Speed
+  p_min <- params[5] # Optimized Min Pass Speed
   
   n <- length(preprocessed_list)
   preds <- numeric(n)
@@ -311,7 +312,6 @@ fast_compute_predictions <- function(params, preprocessed_list) {
     item <- preprocessed_list[[i]]
     
     res <- tryCatch({
-      # Call the updated nfl_dynamic_pitch_control which uses the player object properties
       nfl_dynamic_pitch_control(
         attacking_players = item$att,
         defending_players = item$def,
@@ -320,11 +320,13 @@ fast_compute_predictions <- function(params, preprocessed_list) {
         grid_y = matrix(item$target_y),
         lambda_att = l_att,
         kappa = k_def,
-        tti_sigma = s_tti
+        tti_sigma = s_tti,
+        pass_speed_max = p_max,
+        pass_speed_min = p_min
       )
     }, error = function(e) {
-    print(e$message)
-    return(NULL)
+      print(e$message)
+      return(NULL)
     })
     
     if (!is.null(res)) {
@@ -337,7 +339,8 @@ fast_compute_predictions <- function(params, preprocessed_list) {
 }
 
 fast_pitch_control_objective <- function(params, preprocessed_list) {
-  if (params[1] <= 0 | params[2] <= 0 | params[3] <= 0) return(1e6)
+  # Penalize invalid parameter boundaries, including max speed <= min speed
+  if (params[1] <= 0 | params[2] <= 0 | params[3] <= 0 | params[4] <= params[5]) return(1e6)
   
   preds <- fast_compute_predictions(params, preprocessed_list)
   y_true <- sapply(preprocessed_list, function(x) x$y_true)
@@ -345,8 +348,8 @@ fast_pitch_control_objective <- function(params, preprocessed_list) {
   log_loss <- -mean(y_true * log(preds) + (1 - y_true) * log(1 - preds))
   
   eval_count <<- eval_count + 1
-  cat(sprintf("Eval %3d | lambda: %5.2f | kappa: %5.2f | sigma: %5.2f | Log-Loss: %.5f\n", 
-              eval_count, params[1], params[2], params[3], log_loss))
+  cat(sprintf("Eval %3d | lam: %4.2f | kap: %4.2f | sig: %4.2f | vmax: %4.1f | vmin: %4.1f | Log-Loss: %.5f\n", 
+              eval_count, params[1], params[2], params[3], params[4], params[5], log_loss))
   
   return(log_loss)
 }
@@ -390,20 +393,24 @@ holdout_list <- preprocess_tracking_data_fast(holdout_passes, full_df, global_pl
 # =============================================================================
 cat("\nStep 3: Running Ultra-Fast Optimization on Training Data...\n")
 eval_count <<- 0
-spearman_baseline_params <- c(lambda_att = 3.99, kappa = 1.72, tti_sigma = 0.54)
+
+# Include baseline approximations in baseline array
+spearman_baseline_params <- c(lambda_att = 3.89, kappa = 1.18, tti_sigma = 0.67, pass_speed_max = 23.0, pass_speed_min = 14.0)
 
 opt_results <- optim(
   par = spearman_baseline_params,
   fn = fast_pitch_control_objective,
   preprocessed_list = train_list,
   method = "L-BFGS-B",
-  lower = c(0.5, 0.5, 0.1),
-  upper = c(10.0, 5.0, 2.0),
+  # Added pass speed boundaries: [min_l, min_k, min_s, min_vmax, min_vmin]
+  lower = c(0.5, 0.5, 0.1, 18.0, 10.0), 
+  # Upper bounds: [max_l, max_k, max_s, max_vmax, max_vmin]
+  upper = c(10.0, 5.0, 2.0, 32.0, 17.5), 
   control = list(trace = 1, maxit = 100)
 )
 
 optimized_nfl_params <- opt_results$par
-names(optimized_nfl_params) <- c("lambda_att", "kappa", "tti_sigma")
+names(optimized_nfl_params) <- c("lambda_att", "kappa", "tti_sigma", "pass_speed_max", "pass_speed_min")
 
 saveRDS(optimized_nfl_params, "nfl_pitch_control_params.rds")
 cat("\nOptimization complete. Parameters saved to 'nfl_pitch_control_params.rds'\n")
@@ -434,6 +441,8 @@ results_table <- tibble::tribble(
   "lambda_att",             as.character(spearman_baseline_params["lambda_att"]), sprintf("%.3f", optimized_nfl_params["lambda_att"]),
   "kappa (def mult)",       as.character(spearman_baseline_params["kappa"]),      sprintf("%.3f", optimized_nfl_params["kappa"]),
   "tti_sigma",              as.character(spearman_baseline_params["tti_sigma"]),  sprintf("%.3f", optimized_nfl_params["tti_sigma"]),
+  "pass_speed_max",         as.character(spearman_baseline_params["pass_speed_max"]), sprintf("%.3f", optimized_nfl_params["pass_speed_max"]),
+  "pass_speed_min",         as.character(spearman_baseline_params["pass_speed_min"]), sprintf("%.3f", optimized_nfl_params["pass_speed_min"]),
   "Holdout Log-Loss",       sprintf("%.4f", baseline_log_loss),                  sprintf("%.4f", nfl_log_loss),
   "Holdout ROC-AUC",        sprintf("%.4f", baseline_auc),                       sprintf("%.4f", nfl_auc)
 )
@@ -450,21 +459,19 @@ library(tidyr)
 library(future)
 library(furrr)
 
-# =============================================================================
 # 1. SETUP PARALLEL PLAN
-# =============================================================================
-# Use multisession across available local cores (leaving 1 free for your OS)
 num_workers <- max(1, availableCores() - 1)
 plan(multisession, workers = num_workers)
 
-# Create a temporary directory to store chunked results on disk
 temp_dir <- "play_results_temp"
 if (!dir.exists(temp_dir)) dir.create(temp_dir)
 
-# =============================================================================
-# 2. RESTRUCTURED PROCESSING FUNCTION (Accepts individual play data)
-# =============================================================================
-process_single_play <- function(play_data, output_dir, bounds_df) {
+# Load the parameters optimized in the previous chunk
+optimized_params <- readRDS("nfl_pitch_control_params.rds")
+
+# 2. RESTRUCTURED PROCESSING FUNCTION
+# Added opt_params argument to inject the optimized pass bounds and lambdas
+process_single_play <- function(play_data, output_dir, bounds_df, opt_params) {
   
   current_game_id <- play_data$game_id[1]
   current_play_id <- play_data$play_id[1]
@@ -477,7 +484,6 @@ process_single_play <- function(play_data, output_dir, bounds_df) {
       vx = s * sin(dir_rad),
       vy = s * cos(dir_rad)
     ) %>%
-    # Join the pre-computed dynamic player bounds
     left_join(bounds_df, by = "nfl_id") %>%
     filter(!is.na(x_std) & !is.na(y_std) & !is.na(vx) & !is.na(vy) & !is.na(vmax))
   
@@ -496,7 +502,6 @@ process_single_play <- function(play_data, output_dir, bounds_df) {
     offense_df <- frame_data %>% filter(player_side == "offense")
     defense_df <- frame_data %>% filter(player_side == "defense")
     
-    # Extract dynamic bounds into the player list
     to_player_list <- function(df) {
       if(nrow(df) == 0) return(list())
       lapply(1:nrow(df), function(i) {
@@ -528,12 +533,18 @@ process_single_play <- function(play_data, output_dir, bounds_df) {
     if (length(attacking_players) == 0 || length(defending_players) == 0) next 
     
     results <- tryCatch({
+      # Inject the optimized variables into the frame calculation
       nfl_dynamic_pitch_control(
         attacking_players = attacking_players,
         defending_players = defending_players,
         qb_pos = qb_pos,
         grid_x = grids$x,
-        grid_y = grids$y
+        grid_y = grids$y,
+        lambda_att = opt_params["lambda_att"],
+        kappa = opt_params["kappa"],
+        tti_sigma = opt_params["tti_sigma"],
+        pass_speed_max = opt_params["pass_speed_max"],
+        pass_speed_min = opt_params["pass_speed_min"]
       )
     }, error = function(e) {
       return(NULL) 
@@ -562,43 +573,33 @@ process_single_play <- function(play_data, output_dir, bounds_df) {
   return(file_name)
 }
 
-# =============================================================================
 # 3. EXECUTE PARALLEL MAPPING
-# =============================================================================
-# Calculate kinematic limits globally before mapping
 global_player_bounds <- get_player_kinematic_bounds(full_df)
 
-# Split data into individual plays list
 plays_list <- full_df %>%
   group_by(game_id, play_id) %>%
   group_split()
 
 message(sprintf("Processing %d plays across %d parallel workers...", length(plays_list), num_workers))
 
-# Run in parallel with a progress bar (.progress = TRUE)
+# Pass optimized_params safely to the workers
 saved_files <- future_map_chr(
   plays_list, 
-  ~ process_single_play(.x, temp_dir, bounds_df = global_player_bounds),
+  ~ process_single_play(.x, temp_dir, bounds_df = global_player_bounds, opt_params = optimized_params),
   .options = furrr_options(seed = TRUE),
   .progress = TRUE
 )
 
-# Clean up parallel plan and reset to sequential
 plan(sequential)
 
-# =============================================================================
 # 4. LOAD FROM DISK AND COMBINE
-# =============================================================================
 message("Loading chunked files from disk and combining...")
 
 saved_files <- saved_files[!is.na(saved_files)]
-
 all_rds_files <- list.files(temp_dir, pattern = "\\.rds$", full.names = TRUE)
 final_surface_data <- bind_rows(lapply(all_rds_files, readRDS))
 
-# Write final consolidated CSV
 write.csv(final_surface_data, "field_control_data.csv", row.names = FALSE)
-
 message("Done! Final dataset saved to 'field_control_data.csv'.")
 ```
 

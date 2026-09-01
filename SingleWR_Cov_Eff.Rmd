@@ -8,9 +8,36 @@ output: html_document
 ```{r}
 
 library(tidyverse)
+library(dplyr)
+library(future)
+library(furrr)
+library(purrr)
+library(mgcv)
 
-# Tracking Data
+# =============================================================================
+# 1. LOAD DATA & ENVELOPE MODEL
+# =============================================================================
+
 full_df <- read_csv("~/Documents/Football_R/CMSAC--Field Value/full_data.csv")
+
+# Load exported parameter model from reasonable_pass_bounds_v2
+if (file.exists("optimal_envelope_parameters.rds")) {
+  envelope_model <- readRDS("optimal_envelope_parameters.rds")
+} else {
+  # Fallback default lookup structure if RDS is not present in workspace
+  envelope_model <- list(
+    parameters = tibble(
+      pass_depth_bin   = factor(c("Short", "Medium", "Deep"), levels = c("Short", "Medium", "Deep")),
+      backward_cushion = c(1.0, 1.5, 2.0),
+      corridor_width   = c(2.5, 3.5, 4.5),
+      frames_ahead     = c(10, 15, 20)
+    ),
+    breaks = c(-Inf, 4.5, 12.5, Inf),
+    labels = c("Short", "Medium", "Deep")
+  )
+}
+
+target_receiver_id <- 41233  # Target NFL ID (e.g., Mike Evans)
 
 ```
 
@@ -18,10 +45,8 @@ full_df <- read_csv("~/Documents/Football_R/CMSAC--Field Value/full_data.csv")
 
 ```{r}
 
-library(dplyr)
-
 # =============================================================================
-# SECTION 1 — NFL GRID SETUP
+# 2. HELPER FUNCTIONS: GRID SETUP & ENVELOPE COMPUTATION
 # =============================================================================
 
 build_nfl_grid <- function(pitch_length = 120.0, pitch_width = 53.3, n_cols = 120, n_rows = 54) {
@@ -34,56 +59,57 @@ build_nfl_grid <- function(pitch_length = 120.0, pitch_width = 53.3, n_cols = 12
   return(list(x = grid_x, y = grid_y))
 }
 
-# =============================================================================
-# SECTION 2 — TRACKING DATA PARSER
-# =============================================================================
-
-extract_frame_data <- function(nfl_df, target_game, target_play, target_frame) {
-  # Filter the dataset to the exact frame
-  frame_data <- nfl_df %>%
-    filter(game_id == target_game, play_id == target_play, frame_id == target_frame) %>%
-    filter(!is.na(nfl_id)) 
+# Vectorized point-to-segment corridor envelope builder
+compute_target_envelope <- function(grid_x, grid_y, wr_x, wr_y, wr_vx, wr_vy, wr_speed, pass_depth, envelope_model) {
   
-  # Use dir_std for standardized velocity calculations
-  frame_data <- frame_data %>%
-    mutate(
-      dir_rad = dir_std * pi / 180,
-      vx = s * sin(dir_rad),
-      vy = s * cos(dir_rad)
-    )
+  depth_bin <- cut(pass_depth, breaks = envelope_model$breaks, labels = envelope_model$labels)
+  params <- envelope_model$parameters %>% filter(pass_depth_bin == depth_bin)
   
-  # Split into offense and defense lists
-  offense_df <- frame_data %>% filter(player_side == "offense")
-  defense_df <- frame_data %>% filter(player_side == "defense")
+  if (nrow(params) == 0) params <- envelope_model$parameters %>% slice(1)
   
-  # Helper to convert dataframe rows into the expected list format (Updated to x_std, y_std)
-  to_player_list <- function(df) {
-    lapply(1:nrow(df), function(i) {
-      list(
-        id = df$nfl_id[i],
-        team = df$player_side[i],
-        x = df$x_std[i],
-        y = df$y_std[i],
-        vx = df$vx[i],
-        vy = df$vy[i]
-      )
-    })
+  cushion      <- params$backward_cushion[1]
+  corridor_w   <- params$corridor_width[1]
+  frames_ahead <- params$frames_ahead[1]
+  
+  if (wr_speed > 1e-4) {
+    ux <- wr_vx / wr_speed
+    uy <- wr_vy / wr_speed
+  } else {
+    ux <- 0; uy <- 0
   }
   
-  return(list(
-    attacking_players = to_player_list(offense_df),
-    defending_players = to_player_list(defense_df),
-    target_x = frame_data$ball_land_x_std[1],
-    target_y = frame_data$ball_land_y_std[1]
-  ))
+  # 1 frame = 0.1s in tracking data; proj_len in yards
+  proj_len <- wr_speed * (frames_ahead / 10.0)
+  
+  # Segment endpoints: P0 (backwards cushion) to P1 (forward projection)
+  p0_x <- wr_x - ux * cushion
+  p0_y <- wr_y - uy * cushion
+  p1_x <- wr_x + ux * proj_len
+  p1_y <- wr_y + uy * proj_len
+  
+  seg_dx <- p1_x - p0_x
+  seg_dy <- p1_y - p0_y
+  denom  <- seg_dx^2 + seg_dy^2
+  
+  if (denom > 0) {
+    t <- ((grid_x - p0_x) * seg_dx + (grid_y - p0_y) * seg_dy) / denom
+    t <- pmin(pmax(t, 0), 1)
+  } else {
+    t <- 0
+  }
+  
+  proj_x <- p0_x + t * seg_dx
+  proj_y <- p0_y + t * seg_dy
+  dist   <- sqrt((grid_x - proj_x)^2 + (grid_y - proj_y)^2)
+  
+  return(dist <= corridor_w)
 }
 
 # =============================================================================
-# SECTION 3 — KINEMATICS & BALL FLIGHT (NFL TUNED)
+# 3. KINEMATICS & PITCH CONTROL METRICS
 # =============================================================================
 
 player_time_to_intercept <- function(player, target_x, target_y, default_vmax = 11.0, default_accel = 8.0) {
-  # Extract dynamic player bounds if present, otherwise fall back to default scalars
   vmax <- if (!is.null(player$vmax)) player$vmax else default_vmax
   acceleration <- if (!is.null(player$acceleration)) player$acceleration else default_accel
 
@@ -102,7 +128,6 @@ player_time_to_intercept <- function(player, target_x, target_y, default_vmax = 
   v0_proj <- v0_vec[1] * unit_x + v0_vec[2] * unit_y
   v0_proj <- pmin(v0_proj, vmax)
   
-  # Compute time to reach target using player-specific acceleration and max speed
   t_acc <- (vmax - v0_proj) / acceleration
   d_acc <- (v0_proj * t_acc) + (0.5 * acceleration * (t_acc^2))
   
@@ -111,7 +136,6 @@ player_time_to_intercept <- function(player, target_x, target_y, default_vmax = 
   
   acc_phase_mask <- d_acc >= distances
   acc_phase_mask[is.na(acc_phase_mask)] <- FALSE 
-  
   cruise_phase_mask <- !acc_phase_mask
   cruise_phase_mask[is.na(cruise_phase_mask)] <- FALSE 
   
@@ -128,8 +152,6 @@ player_time_to_intercept <- function(player, target_x, target_y, default_vmax = 
 }
 
 estimate_nfl_pass_bounds <- function(distances) {
-  # Approximations for thrown footballs in yards
-  # Fast bullet pass ~ 23 yds/sec, high lob ~ 14 yds/sec
   min_time <- distances / 23.0 
   max_time <- distances / 14.0
   return(list(min = pmax(min_time, 0.0), max = pmax(max_time, 0.0)))
@@ -141,26 +163,17 @@ football_travel_time <- function(qb_x, qb_y, target_x, target_y, attacking_playe
   distances <- sqrt(dx^2 + dy^2)
   
   bounds <- estimate_nfl_pass_bounds(distances)
-  
   tti_shape <- dim(target_x)
-  if (is.null(tti_shape)) nearest_attacker_tti <- rep(Inf, length(target_x))
-  else nearest_attacker_tti <- array(Inf, dim = tti_shape)
+  nearest_attacker_tti <- if (is.null(tti_shape)) rep(Inf, length(target_x)) else array(Inf, dim = tti_shape)
   
   for (player in attacking_players) {
-    # Skip if player is the QB (assumed to be the one throwing)
     if (abs(player$x - qb_x) < 0.1 && abs(player$y - qb_y) < 0.1) next
-    
     player_tti <- player_time_to_intercept(player, target_x, target_y)
     nearest_attacker_tti <- pmin(nearest_attacker_tti, player_tti)
   }
   
-  selected_ball_time <- pmin(pmax(nearest_attacker_tti, bounds$min), bounds$max)
-  return(selected_ball_time)
+  return(pmin(pmax(nearest_attacker_tti, bounds$min), bounds$max))
 }
-
-# =============================================================================
-# SECTION 4 — ARRIVAL PROBABILITY & INTEGRATION
-# =============================================================================
 
 arrival_probability <- function(t, tti, tti_sigma = 0.54) {
   exponent <- -pi / sqrt(3.0) / tti_sigma * (t - tti)
@@ -169,17 +182,13 @@ arrival_probability <- function(t, tti, tti_sigma = 0.54) {
 }
 
 control_rate <- function(t, tti, lambda_j = 3.99, tti_sigma = 0.54) {
-  P <- arrival_probability(t, tti, tti_sigma)
-  return(P * lambda_j)
+  return(arrival_probability(t, tti, tti_sigma) * lambda_j)
 }
 
 nfl_dynamic_pitch_control <- function(attacking_players, defending_players, qb_pos, grid_x, grid_y, in_target_zone = NULL,
-                                      dt = 0.05, max_time = 8.0,
-                                      lambda_att = 3.99, kappa = 1.72, tti_sigma = 0.54) {
+                                      dt = 0.05, max_time = 8.0, lambda_att = 3.89, kappa = 1.18, tti_sigma = 0.67) {
   
   lambda_def <- lambda_att * kappa
-  
-  # Calculate TTI using each player's individual vmax and acceleration parameters
   TTI_att <- lapply(attacking_players, function(p) player_time_to_intercept(p, grid_x, grid_y))
   TTI_def <- lapply(defending_players, function(p) player_time_to_intercept(p, grid_x, grid_y))
   
@@ -227,88 +236,37 @@ nfl_dynamic_pitch_control <- function(attacking_players, defending_players, qb_p
 
 # Processing
 ```{r}
-library(dplyr)
-library(ggplot2)
-library(gganimate)
-library(tidyr)
-library(future)
-library(furrr)
-library(purrr)
-library(quantreg)
-library(splines)
-
 # =============================================================================
-# 1. UPSTREAM ATHLETIC PROFILES & DATA FILTERING
+# 4. DATA PIPELINE & PLAY PROCESSING
 # =============================================================================
-WR_id_find <- full_df %>%
-  filter(player_name == 'Mike Evans') %>% 
-  select(nfl_id, player_name) %>% 
-  distinct()
 
-target_receiver_id <- 41233  # Replace with actual target nfl_id if needed
-
-message("Computing player-specific athletic profiles (vmax and acceleration)...")
-
-# Pre-compute dynamic top speed and max acceleration per player
-player_athletic_profiles <- full_df %>%
+# Pre-compute player athletic profiles
+player_profiles <- full_df %>%
   filter(!is.na(nfl_id), !is.na(s)) %>%
   group_by(nfl_id) %>%
   summarize(
-    vmax = quantile(s, 0.99, na.rm = TRUE),
-    acceleration = if ("a" %in% names(.)) quantile(a, 0.99, na.rm = TRUE) else 8.0,
+    vmax = pmax(pmin(quantile(s, 0.99, na.rm = TRUE), 12.5), 7.0),
+    acceleration = if ("a" %in% names(.)) pmax(pmin(quantile(a, 0.99, na.rm = TRUE), 10.0), 5.0) else 8.0,
     .groups = "drop"
-  ) %>%
-  mutate(
-    vmax = pmax(pmin(vmax, 12.5), 7.0),
-    acceleration = pmax(pmin(acceleration, 10.0), 5.0)
   )
 
-message("Optimizing upstream data structure...")
-
-# Filter relevant plays/players and attach dynamic kinematic bounds
 optimized_df <- full_df %>%
   filter(phase == "pre_pass", !is.na(nfl_id)) %>%
   group_by(game_id, play_id) %>%
   filter(any(nfl_id == target_receiver_id)) %>%
   ungroup() %>%
-  filter(
-    tolower(player_side) == "defense" | 
-    nfl_id == target_receiver_id | 
-    tolower(player_position) == "qb"
-  ) %>%
-  left_join(player_athletic_profiles, by = "nfl_id") %>%
+  filter(tolower(player_side) == "defense" | nfl_id == target_receiver_id | tolower(player_position) == "qb") %>%
+  left_join(player_profiles, by = "nfl_id") %>%
   mutate(
     vmax = coalesce(vmax, 11.0),
     acceleration = coalesce(acceleration, 8.0)
   )
 
-message("Applying spline model pre-computation vector-wide...")
-
-# Load quantile regression spline model bundle once
-pitch_model <- readRDS("pitch_control_spline_model.rds")
-
-# Vectorized spatial pre-calculation on full dataset
-optimized_df <- optimized_df %>%
-  mutate(
-    receiver_depth = pmax(abs(x_std - los_x_std), 0.1),
-    r_x = pmax(predict(pitch_model$qr_x, newdata = tibble(receiver_depth = receiver_depth)), 0.1),
-    r_y = pmax(predict(pitch_model$qr_y, newdata = tibble(receiver_depth = receiver_depth)), 0.1),
-    center_x = x_std + pitch_model$lead_bias
-  )
-
-# Free model artifact memory before parallel split
-rm(pitch_model)
-gc()
-
-# Split dataset into individual play dataframes
 plays_list <- optimized_df %>%
   group_by(game_id, play_id) %>%
   group_split()
 
-# =============================================================================
-# 2. WORKER PROCESSING FUNCTION
-# =============================================================================
-process_single_play <- function(play_data, output_dir, target_wr_id = NULL) {
+process_single_play <- function(play_data, output_dir, target_wr_id, envelope_model) {
   
   current_game_id <- play_data$game_id[1]
   current_play_id <- play_data$play_id[1]
@@ -340,18 +298,12 @@ process_single_play <- function(play_data, output_dir, target_wr_id = NULL) {
     offense_df <- frame_data %>% filter(player_side == "offense")
     defense_df <- frame_data %>% filter(player_side == "defense")
     
-    # Updated helper to include dynamic player bounds
     to_player_list <- function(df) {
       if (nrow(df) == 0) return(list())
       lapply(1:nrow(df), function(i) {
         list(
-          id = df$nfl_id[i], 
-          x = df$x_std[i], 
-          y = df$y_std[i], 
-          vx = df$vx[i], 
-          vy = df$vy[i],
-          vmax = df$vmax[i],
-          acceleration = df$acceleration[i]
+          id = df$nfl_id[i], x = df$x_std[i], y = df$y_std[i], 
+          vx = df$vx[i], vy = df$vy[i], vmax = df$vmax[i], acceleration = df$acceleration[i]
         )
       })
     }
@@ -359,47 +311,41 @@ process_single_play <- function(play_data, output_dir, target_wr_id = NULL) {
     qb_row <- offense_df %>% filter(tolower(player_position) == "qb") %>% slice(1)
     if (nrow(qb_row) == 0) qb_row <- offense_df %>% slice(1) 
     
-    if (nrow(qb_row) > 0) {
-      qb_pos <- list(x = qb_row$x_std, y = qb_row$y_std)
-      offense_df <- offense_df %>% filter(nfl_id != qb_row$nfl_id)
-    } else {
-      qb_pos <- list(x = 60, y = 26.6)
-    }
+    qb_pos <- if (nrow(qb_row) > 0) list(x = qb_row$x_std, y = qb_row$y_std) else list(x = 60, y = 26.6)
+    if (nrow(qb_row) > 0) offense_df <- offense_df %>% filter(nfl_id != qb_row$nfl_id)
     
-    if (!is.null(target_wr_id)) {
-      target_offense_df <- offense_df %>% filter(nfl_id == target_wr_id)
-    } else {
-      target_offense_df <- offense_df
-    }
+    target_offense_df <- offense_df %>% filter(nfl_id == target_wr_id)
+    if (nrow(target_offense_df) == 0) next
     
     attacking_players <- to_player_list(target_offense_df)
     defending_players <- to_player_list(defense_df)
     
-    if (length(attacking_players) == 0 || length(defending_players) == 0) {
-      next 
-    }
+    if (length(attacking_players) == 0 || length(defending_players) == 0) next
     
-    # Extract pre-computed spline bounds and shifted center
-    wr_y     <- target_offense_df$y_std[1]
-    center_x <- target_offense_df$center_x[1]
-    r_x      <- target_offense_df$r_x[1]
-    r_y      <- target_offense_df$r_y[1]
+    wr_x <- target_offense_df$x_std[1]
+    wr_y <- target_offense_df$y_std[1]
+    wr_vx <- target_offense_df$vx[1]
+    wr_vy <- target_offense_df$vy[1]
+    wr_speed <- target_offense_df$s[1]
+    los_x <- target_offense_df$los_x_std[1]
+    pass_depth <- wr_x - los_x
     
-    # Ellipse spatial evaluation centered on lead_bias adjusted point
-    in_target_zone <- (((grids$x - center_x) / r_x)^2 + ((grids$y - wr_y) / r_y)^2) <= 1.0
+    # Calculate target zone envelope bounds dynamically
+    in_target_zone <- compute_target_envelope(
+      grid_x = grids$x, grid_y = grids$y,
+      wr_x = wr_x, wr_y = wr_y, wr_vx = wr_vx, wr_vy = wr_vy,
+      wr_speed = wr_speed, pass_depth = pass_depth, envelope_model = envelope_model
+    )
     
     results <- tryCatch({
       nfl_dynamic_pitch_control(
         attacking_players = attacking_players,
         defending_players = defending_players,
         qb_pos = qb_pos,
-        grid_x = grids$x,
-        grid_y = grids$y,
+        grid_x = grids$x, grid_y = grids$y,
         in_target_zone = in_target_zone
       )
-    }, error = function(e) {
-      return(NULL) 
-    })
+    }, error = function(e) NULL)
     
     if (is.null(results)) next
     
@@ -414,57 +360,37 @@ process_single_play <- function(play_data, output_dir, target_wr_id = NULL) {
   if (length(all_frames_ppcf) == 0) return(NA_character_)
   
   surface_data <- bind_rows(all_frames_ppcf) %>%
-    mutate(
-      game_id = current_game_id,
-      play_id = current_play_id
-    )
+    mutate(game_id = current_game_id, play_id = current_play_id)
   
   file_name <- file.path(output_dir, paste0("play_", current_game_id, "_", current_play_id, ".rds"))
   saveRDS(surface_data, file_name)
-  
   return(file_name)
 }
 
 # =============================================================================
-# 3. DIRECTORY CLEANUP & PARALLEL COMPUTE
+# 5. EXECUTION & PARALLEL WORKERS
 # =============================================================================
+
 temp_dir <- "play_results_temp"
-
-# Safely catch and reset temp directory across multiple execution runs
-if (dir.exists(temp_dir)) {
-  unlink(temp_dir, recursive = TRUE, force = TRUE)
-}
+if (dir.exists(temp_dir)) unlink(temp_dir, recursive = TRUE, force = TRUE)
 dir.create(temp_dir, showWarnings = FALSE, recursive = TRUE)
-
-message(sprintf("Processing %d relevant plays across 8 parallel workers...", length(plays_list)))
 
 plan(multisession, workers = 8)
 
 saved_files <- future_map_chr(
   plays_list, 
-  ~ process_single_play(.x, temp_dir, target_wr_id = target_receiver_id),
+  ~ process_single_play(.x, temp_dir, target_wr_id = target_receiver_id, envelope_model = envelope_model),
   .options = furrr_options(seed = TRUE),
   .progress = TRUE
 )
 
 plan(sequential)
 
-# =============================================================================
-# 4. CONSOLIDATE DISK RESULTS & SAVE CSV
-# =============================================================================
-message("Loading chunked files from disk and combining...")
-
 valid_saved_files <- saved_files[!is.na(saved_files) & file.exists(saved_files)]
-
 if (length(valid_saved_files) > 0) {
   final_surface_data <- bind_rows(lapply(valid_saved_files, readRDS))
-  
-  output_csv_path <- "Mike_Evans_field_control_data.csv"
-  write.csv(final_surface_data, output_csv_path, row.names = FALSE)
-  
-  message(sprintf("Done! Final dataset saved to '%s'.", output_csv_path))
-} else {
-  warning("No plays produced valid output files.")
+  write.csv(final_surface_data, "Mike_Evans_field_control_data.csv", row.names = FALSE)
+  message("Field control computation successfully completed using dynamic reasonable pass bounds.")
 }
 ```
 
