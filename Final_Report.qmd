@@ -114,6 +114,40 @@ By combining this continuous $xEPA$ surface with the kinematic pitch control mat
 
 ## 3.3 Reasonable Pass Bounds
 
+To prevent evaluating defensive spatial control over physically unviable pass trajectories, the modeling evaluation space is constrained to a dynamically calculated Pareto boundary dubbed the Reasonable Pass Bounds. This spatial envelope establishes the domain of realistic pass landing locations given the target receiver’s route trajectory, velocity vector, and lookahead horizon at any given time.
+
+### Sample Filtering and Dynamic Categorization
+
+The calibration pipeline strictly isolates un-penalized, completed passes ($\text{pass\_result} = \text{'C'}$) exclusively during the pre-pass phase. This filter was chosen to identify pass locations that had a reasonable chance of being completed. For instance, we deliberately remove throwaways, overthrown deep passes, and batted balls. Pass depth is dynamically calculated relative to the line of scrimmage utilizing the receiver's anchor coordinates at the exact throw frame (the maximum available pre-pass frame):
+  $$x_{\text{depth}} = x_{\text{anchor}} - x_{\text{los}}$$
+  
+Rather than utilizing static yardage cutoffs, route depths are partitioned dynamically into three discrete bins based on the sample mean ($\mu$) and standard deviation ($\sigma$) of the empirical release depths: Short ($< \mu - \sigma$), Medium ($[\mu - \sigma, \mu + \sigma]$), and Deep ($> \mu + \sigma$).
+
+### Route Geometry and Spatial Envelope Mechanics
+
+For a given lookahead horizon of $N$ frames post-current frame ($N \in \{5, 10, \dots, 30\}$), the receiver’s step speed ($v$) and movement unit vector are computed using their current frame diagnostics. A projected forward segment length ($L$) is extrapolated from the receiver's anchor point $(x_{\text{anchor}}, y_{\text{anchor}})$ by multiplying the step speed by the lookahead frame count:
+  $$L = v \times N$$
+The total spatial bounds around this trajectory are modeled as the union of two geometric regions:  
+
+- **Forward Corridor**: A tubular buffer extending along the projected route path with a lateral half-width $w$. A coordinate falls within the forward tube if its orthogonal distance to the projected segment satisfies $d_{\perp} \le w$, and its projected arc length along the path satisfies $0 \le s \le L$.  
+- **Backward Cushion Zone**: To account for underthrown adjustments, a rectangular cushion extends behind the throw anchor point along the inverse of the receiver's initial direction vector $\vec{u}$. A point falls in this backward zone if its longitudinal backward displacement satisfies $0 \le d_{\parallel, \text{back}} \le b$ and its perpendicular offset satisfies $d_{\perp, \text{back}} \le w$.  
+
+A pass coordinate is enclosed within the total spatial envelope if it falls into either the forward tube or the backward cushion zone. These limits are computed for each frame of the WR's route pre-throw.   
+
+### Stratified Grid Calibration and Optimization
+
+Parameters are optimized independently for each depth bin $k$ to account for kinematic variations across route depths utilizing a parallelized grid search. The search space evaluates backward cushions $b \in [0, 3]$ yards (step $0.5$), corridor widths $w \in [1, 6]$ yards (step $0.5$), and lookahead horizons $N$ tailored specifically to each depth bin.  For each depth bin, the optimal parameter tuple $(b_k^*, w_k^*, N_k^*)$ minimizes the total envelope surface area ($Area$) while guaranteeing a target empirical pass coverage threshold $\alpha \ge 0.90$:
+  $$\min_{w, b, N} \quad 2w (L + b) + \pi w^2 \quad \text{subject to} \quad \frac{1}{M_k} \sum_{i=1}^{M_k} \mathbb{I}_{\text{inside}, i} \ge 0.90$$
+  
+where $M_k$ is the total play count in bin $k$. To maintain physical consistency, corridor widths are constrained to be strictly monotonic across increasing depth bins utilizing a cumulative maximum function. This monotonic restriction ensures that deeper passes will be treated with more flexible reasonable pass bounds due to increased ball time in air and time for the receiver to reach the ball.   
+
+### Residual Diagnostics
+
+Spatial residual errors are decomposed into perpendicular lateral errors ($r_{\perp} = d_{\perp}$) and longitudinal depth errors relative to the projected line segment ($r_{\parallel} = s - L$). Diagnostic evaluation confirms that the vast majority of longitudinal residuals are negative, demonstrating that the projected forward segment acts as an effective upper bound that successfully encloses all catchable targets.  
+
+Variance across route depths relative to the line of scrimmage is assessed using non-parametric LOESS smoothing. The smoothing demonstrates general stability across most route depths, although localized variance and structural shifts emerge within the 10-to-20-yard intermediate range. These shifts are due to the use of discrete bucketing, wherein routes that barely cross into the next depth threshold may have larger than realistic bounds since they fall in the shallower end of a deep pass bucket.  
+
+The overall distribution of lateral errors is evaluated utilizing density histograms and normal Q-Q plots of model residuals. Rather than confirming normality, these diagnostics reveal a heavily right-skewed distribution; the distribution exhibits a hard lower bound near zero and a significant upward deviation from theoretical normal quantiles, reflecting a long tail of extreme lateral outliers. This heavy tail supports the use of empirical thresholds via grid search rather than linear models to set parameters for reasonable pass bounds.
 
 ## 3.4 Dangerous Viable Space (DVS) 
 
