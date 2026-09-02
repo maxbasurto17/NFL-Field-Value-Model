@@ -6,4 +6,10 @@ In the NFL, route-running is one of a wide receiver’s (WR) most important skil
 
 ## Repository Info
 **Methodology:**
-Contains folders with the following items: Pitch Control Model inspiration and implementation, xEPA Field Value Model, Reasonable Pass Bounds optimization, 
+Contains folders with the following items:
+
+* **Data Cleaning and Prep:**
+* **Field Control Model:**
+* **Field Value Model:**
+* **Final Metrics Computation:**
+* **Reasonable Pass Bounds:**
