@@ -8,8 +8,8 @@ In the NFL, route-running is one of a wide receiver’s (WR) most important skil
 **Methodology:**
 Contains folders with the following items:
 
-* **Data Cleaning and Prep:**
-* **Field Control Model:**
-* **Field Value Model:**
-* **Final Metrics Computation:**
-* **Reasonable Pass Bounds:**
+* **Data Cleaning and Prep:** Combines inputs, outputs, and supplementary data into one file. Standardizes field coordinates so that all offenses are oriented in the same direction.
+* **Field Control Model:** Contains files for the baseline soccer model, adapted football field control, and a calculation for the reasonable range of passing velocity that's used in the control model.
+* **Field Value Model:** Establishes xEPA as our field value metric.
+* **Final Metrics Computation:** Combines field control and value into a single pipeline to evaluate wide receivers using the metrics derived from control and value.
+* **Reasonable Pass Bounds:** Optimizes a boundary for which a Quarterback would reasonably throw the football to a receiver at any given moment in the receiver's route, controlling the area considered for DVS.
