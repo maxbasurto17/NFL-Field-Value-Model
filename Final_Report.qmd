@@ -167,3 +167,23 @@ From this continuous array of frame-level threat generation, the model extracts 
 
 - **Average Route Threat Efficiency (aRTE)**: Calculated as the mean Frame DVS across all analyzed pre-pass frames. This metric quantifies a receiver’s baseline ability to sustain high-value spatial control throughout the entire duration of a route's development.  
 - **Maximum Route Threat Efficiency (mRTE)**: Isolated as the peak (maximum) Frame DVS achieved at any point during the pre-pass lifecycle. This captures a receiver's peak window-creation ability, measuring their capacity to generate explosive threat at the optimal timing of a play
+
+# References
+
+Bischofberger, J., & Baca, A. (2025). Dangerous accessible space: A unified model of space and value in team sports [Preprint]. Research Square. https://doi.org/10.21203/rs.3.rs-6932689/v1
+
+Burke, B. (2010, January 30). Expected points (EP) and expected points added (EPA) explained. Advanced NFL Stats. http://www.advancedfootballanalytics.com/2010/01/expected-points-ep-and-expected-points.html
+
+Carter, V., & Machol, R. E. (1971). Technical note—Operations research on football. Operations Research, 19(2), 541–544. https://doi.org/10.1287/opre.19.2.541
+
+Fernández, J., & Bornn, L. (2018). Wide open spaces: A statistical technique for measuring space creation in professional soccer. Proceedings of the 12th MIT Sloan Sports Analytics Conference.
+
+Inayatali, H., White, A., & Hocevar, D. (2023). Between the lines: How do we measure pressure? [Notebook]. Kaggle, NFL Big Data Bowl 2023. https://www.kaggle.com/code/hassaaninayatali/between-the-lines-how-do-we-measure-pressure
+
+Spearman, W. (2018). Beyond expected goals. Proceedings of the 12th MIT Sloan Sports Analytics Conference, 1–17.
+
+Spearman, W., Basye, A., Dick, G., Hotovy, R., & Pop, P. (2017). Physics-based modeling of pass probabilities in soccer. Proceedings of the 11th MIT Sloan Sports Analytics Conference.
+
+Subbaiah, M., Chu, D., Reyers, M., & Wu, L. (2021). Illuminating the defense [Notebook]. Kaggle, NFL Big Data Bowl 2021. https://www.kaggle.com/code/msubbaiah/illuminating-the-defense
+
+Yurko, R., Ventura, S., & Horowitz, M. (2019). nflWAR: A reproducible method for offensive player evaluation in football. Journal of Quantitative Analysis in Sports, 15(3), 163–183. https://doi.org/10.1515/jqas-2018-0010
