@@ -16,7 +16,7 @@ format:
 
 # 1 Introduction & Motivation
 
-In American football, evaluating a wide receiver’s (WR) route-running performance remains heavily polluted by downstream outcomes and lacks comprehensive metrics that evaluate all components of route running. Traditional box-score metrics such as targets, yards per route run (YPRR), and completion percentage are fundamentally conditional on quarterback decision-making, offensive line protection, and play design. Modern Next Gen Stats tracking metrics, such as separation at the time of release or catch, evaluate receivers only at discrete static moments. These snapshots ignore how a receiver creates, sustains, or loses spatial control across the full life of a pass play. Furthermore, existing spatial models treat all open field as equally valuable. Gaining two yards of separation near the line of scrimmage on 3rd & 15 does not contribute equally to drive success as gaining equal separation beyond the line to gain. Since separation metrics are considered in a vaccum, this true value a WR generates through creating space at different field depths is often lost. 
+In American football, evaluating a wide receiver’s (WR) route-running performance remains heavily polluted by downstream outcomes and lacks comprehensive metrics that evaluate all components of route running. Traditional box-score metrics such as targets, yards per route run (YPRR), and completion percentage are fundamentally conditional on quarterback decision-making, offensive line protection, and play design. Modern Next Gen Stats tracking metrics, such as separation at the time of release or catch, evaluate receivers only at discrete static moments. These snapshots ignore how a receiver creates, sustains, or loses spatial control across the full life of a pass play. Furthermore, existing spatial models treat all open field as equally valuable. Gaining two yards of separation near the line of scrimmage on 3rd & 15 does not contribute equally to drive success as gaining equal separation beyond the line to gain. Since separation metrics are considered in a vacuum, this true value a WR generates through creating space at different field depths is often lost. 
 
 This creates a critical analytical gap: a receiver who runs a crisp route and establishes leverage in high-value field real estate receives zero or little credit if the quarterback is sacked or progresses elsewhere; meanwhile a receiver who wins late against a blown coverage can inherit inflated outcome metrics. To truly isolate wide receiver route-running quality from team-level noise, an evaluation framework must satisfy three criteria:
 
@@ -33,9 +33,9 @@ To address these requirements, we introduce Dangerous Viable Space (**DVS**), a 
 
 By stripping out target bias, play outcome variance, and screen-play execution noise, aRTE and mRTE provide coaches and front-office analysts with an objective metric for evaluating isolated WR skill, scheme fit, and receiver archetypes.
 
-The remainder of this paper is structured as follows: Section 2 outlines the NFL Big Data Bowl dataset and our data curation pipeline; Section 3 details the spatial xEPA field valuation model, the adapted physics-based pitch control model, and the Pareto-frontier pass bounds; Section 4 presents empirical results and validates the aRTE and mRTE metrics across player archetypes; Section 5 discusses practical applications for NFL front offices and coaching staff; and Section 6 provides our reproducibility statement and computational repository structure.
+The remainder of this paper is structured as follows: Section 2 introduces the inspiration and research that precedes our framework; Section 3 outlines the NFL Big Data Bowl dataset and our data curation pipeline; Section 4 details the spatial xEPA field valuation model, the adapted physics-based pitch control model, and the Pareto-frontier pass bounds; Section 5 presents empirical results and validates the aRTE and mRTE metrics across player archetypes; Section 6 discusses practical applications for NFL front offices and coaching staff; and Section 7 provides our reproducibility statement and computational repository structure.
 
-# 2 Data
+# 3 Data
 
 Data for this study are sourced from the open-access 2026 NFL Big Data Bowl dataset (NFL, 2025), comprising over 14,000 passing attempts from the 2023 NFL regular season. The dataset combines high-frequency spatial-temporal tracking captured at 10 Hz (10 observations per second) with rich play-level metadata. The tracking data records continuous positional coordinates ($x, y$), speed, acceleration, and orientation for all eligible receivers, defensive backs, and quarterbacks from the moment the ball is snapped until the pass is rendered complete or incomplete.  
 
@@ -48,8 +48,8 @@ Play-level metadata (down, distance, yardline, and baseline expected points) was
 
 Plays designated as wide receiver screens, spikes, sacks, or pre-pass penalties were filtered out of the primary sample to isolate true downfield route execution from deliberate backfield design and play-breakdown noise.
 
-# 3 Methodology & Modeling Framework
-## 3.1 Field Control Model
+# 4 Methodology & Modeling Framework
+## 4.1 Field Control Model
 
 Our pitch control framework adapts William Spearman’s (2017) physics-based spatial ownership model to the specific kinematics of American football. Because the flight profile and arrival mechanics of an aerial football pass differ fundamentally from a soccer pass, we re-engineered the ball kinematics to map expected completion percentages continuously across the field.
 
@@ -84,7 +84,7 @@ where $T_{\text{ball}}$ is the time required for the football to reach the targe
 
 - **Quarterback Exclusion**: The quarterback's spatial control rate ($\lambda_{qb}$) is permanently forced to 0. The quarterback cannot complete a pass to himself, so his tracking coordinates only serve as the geometric origin point for throw distance calculations.   
 
-## 3.2 Field Value Model (xEPA)
+## 4.2 Field Value Model (xEPA)
 
 The field value model quantifies the magnitude of drive-specific Expected Points ($EP$) generated by isolating the specific context of a play independent of game-state noise like win probability. A 20-yard reception on 3rd & 15 carries identical intrinsic spatial value whether a team is tied or trailing by 30 points. To evaluate wide receivers independent of their supporting cast and overarching game state, Expected Points isolations best answer where and how much field position gains support a team's localized effort to score.
 
@@ -112,7 +112,7 @@ To isolate the expected spatial Expected Points Added ($xEPA$) at any specific g
   $$xEPA(x, y) = \mathbb{E}[PostEP] - \overline{PreEP}$$
 By combining this continuous $xEPA$ surface with the kinematic pitch control matrices, the expected value of a receiver's spatial control can be evaluated on a frame-by-frame basis throughout the route.
 
-## 3.3 Reasonable Pass Bounds
+## 4.3 Reasonable Pass Bounds
 
 To prevent evaluating defensive spatial control over physically unviable pass trajectories, the modeling evaluation space is constrained to a dynamically calculated Pareto boundary dubbed the Reasonable Pass Bounds. This spatial envelope establishes the domain of realistic pass landing locations given the target receiver’s route trajectory, velocity vector, and lookahead horizon at any given time.
 
@@ -149,7 +149,7 @@ Variance across route depths relative to the line of scrimmage is assessed using
 
 The overall distribution of lateral errors is evaluated utilizing density histograms and normal Q-Q plots of model residuals. Rather than confirming normality, these diagnostics reveal a heavily right-skewed distribution; the distribution exhibits a hard lower bound near zero and a significant upward deviation from theoretical normal quantiles, reflecting a long tail of extreme lateral outliers. This heavy tail supports the use of empirical thresholds via grid search rather than linear models to set parameters for reasonable pass bounds.
 
-## 3.4 Dangerous Viable Space (DVS) 
+## 4.4 Dangerous Viable Space (DVS) 
 
 Dangerous Viable Space (DVS) represents the mathematical synthesis of the kinematic field control model and the continuous expected points surface. To calculate the localized threat generated by a receiver at any discrete field coordinate $(x, y)$, the framework computes a combined metric integrating spatial ownership with the intrinsic expected scoring value of that specific location.
 
