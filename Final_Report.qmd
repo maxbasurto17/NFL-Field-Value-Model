@@ -16,7 +16,7 @@ format:
 
 # 1 Introduction & Motivation
 
-In American football, evaluating a wide receiver’s (WR) route-running performance remains heavily polluted by downstream outcomes and lacks comprehensive metrics that evaluate all components of route running. Traditional box-score metrics such as targets, yards per route run (YPRR), and completion percentage are fundamentally conditional on quarterback decision-making, offensive line protection, and play design. Modern Next Gen Stats tracking metrics, such as separation at the time of release or catch, evaluate receivers only at discrete static moments. These snapshots ignore how a receiver creates, sustains, or loses spatial control across the full life of a pass play. Furthermore, existing spatial models treat all open field as equally valuable. Gaining two yards of separation near the line of scrimmage on 3rd & 15 does not contribute equally to drive success as gaining equal separation beyond the line to gain. Since separation metrics are considered in a vacuum, this true value a WR generates through creating space at different field depths is often lost. 
+In American football, evaluating a wide receiver’s (WR) route-running performance remains heavily polluted by downstream outcomes and lacks comprehensive metrics that evaluate all components of route running. Traditional box-score metrics such as targets, yards per route run (YPRR), and completion percentage are fundamentally conditional on quarterback decision-making, offensive line protection, and play design. Modern Next Gen Stats tracking metrics, such as separation at the time of release or catch, evaluate receivers only at discrete static moments (NFL Next Gen Stats, n.d.). These snapshots ignore how a receiver creates, sustains, or loses spatial control across the full life of a pass play. Furthermore, existing spatial models treat all open field as equally valuable. Gaining two yards of separation near the line of scrimmage on 3rd & 15 does not contribute equally to drive success as gaining equal separation beyond the line to gain. Since separation metrics are considered in a vacuum, this true value a WR generates through creating space at different field depths is often lost. 
 
 This creates a critical analytical gap: a receiver who runs a crisp route and establishes leverage in high-value field real estate receives zero or little credit if the quarterback is sacked or progresses elsewhere; meanwhile a receiver who wins late against a blown coverage can inherit inflated outcome metrics. To truly isolate wide receiver route-running quality from team-level noise, an evaluation framework must satisfy three criteria:
 
@@ -26,19 +26,20 @@ This creates a critical analytical gap: a receiver who runs a crisp route and es
 
 - **Physical Realism**: Bound spatial control to realistic, viable passing trajectories given player speed, acceleration limits, and throw geometry.
 
-To address these requirements, we introduce Dangerous Viable Space (**DVS**), a spatial control framework that quantifies a receiver's real-time threat generation. We adapt Spearman’s (2017) physics-based soccer pitch control model to the discrete mechanics of American football, modeling receiver and defensive back movement dynamics alongside aerial ball trajectories. We layer this spatial control surface over a spatial Expected Points Added (**xEPA**) model that assigns an expected drive-value generation to every point on the grid. Crucially, we restrict evaluation exclusively to Reasonable Pass Bounds—a dynamically calculated Pareto frontier that isolates physically viable throw envelopes for the quarterback. By accumulating DVS across each frame of a route, we propose two novel, target-independent evaluation metrics:
+To address these requirements, we introduce Dangerous Viable Space (**DVS**), a spatial control framework that quantifies a receiver's real-time threat generation. We adapt Spearman’s (2017) physics-based soccer pitch control model to the discrete mechanics of American football, modeling receiver and defensive back movement dynamics alongside aerial ball trajectories. We layer this spatial control surface over a spatial Expected Points Added (**xEPA**) model that assigns an expected drive-value generation to every point on the grid. Crucially, we restrict evaluation exclusively to Reasonable Pass Bounds—a dynamically calculated Pareto frontier that isolates physically viable throw envelopes for the quarterback. By accumulating DVS across each frame of a route, we propose three novel, target-independent evaluation metrics:
 
 - **Average Route Threat Efficiency (aRTE)**: Quantifies a receiver’s ability to sustain control over high-value space throughout the duration of a route.
 - **Maximum Route Threat Efficiency (mRTE)**: Captures peak window-creation ability, measuring how effectively a receiver creates maximum threat during key timing windows.
+- **Final Route Threat Efficiency (fRTE)**: Captures a receiver's ability to sustain a downfield threat through the end of his route. 
 
 By stripping out target bias, play outcome variance, and screen-play execution noise, aRTE and mRTE provide coaches and front-office analysts with an objective metric for evaluating isolated WR skill, scheme fit, and receiver archetypes.
 
-The remainder of this paper is structured as follows: Section 2 introduces the inspiration and research that precedes our framework; Section 3 outlines the NFL Big Data Bowl dataset and our data curation pipeline; Section 4 details the spatial xEPA field valuation model, the adapted physics-based pitch control model, and the Pareto-frontier pass bounds; Section 5 presents empirical results and validates the aRTE and mRTE metrics across player archetypes; Section 6 discusses practical applications for NFL front offices and coaching staff; and Section 7 provides our reproducibility statement and computational repository structure.
+The remainder of this paper is structured as follows: Section 2 introduces the inspiration and research that precedes our framework; Section 3 outlines the NFL Big Data Bowl dataset and our data curation pipeline; Section 4 details the spatial xEPA field valuation model, the adapted physics-based pitch control model, and the Pareto-frontier pass bounds; Section 5 presents empirical results and validates the aRTE, mRTE and fRTE metrics across player archetypes; and Section 6 discusses practical applications for NFL front offices and coaching staff.
 
 # Literature Review
 
 ## Current Receiver Metrics
-Despite the development of several receiver skill metrics, current evaluation tools have real limitations that our framework aims to overcome. Next Gen Stats records separation, the distance between a receiver and the nearest defender at a given moment. While this captures some of the receiver-defender spatial interaction, raw separation misses the complete spatial picture that actually determines how a pass plays out. In Figure X, the receiver has significant separation at the moment of release, but the defender's closing speed lets him erase that gap almost immediately, a phenomenon that separation alone can't account for.
+Despite the development of several receiver skill metrics, current evaluation tools have real limitations that our framework aims to overcome. Next Gen Stats records separation, the distance between a receiver and the nearest defender at the time of ball arrival (NFL Next Gen Stats, n.d.). While this captures some of the receiver-defender spatial interaction, raw separation misses the complete spatial picture that actually determines how a pass plays out. In Figure X, the receiver has significant separation at the moment of release, but the defender's closing speed lets him erase that gap almost immediately, a phenomenon that separation alone can't account for.
 
 Other common metrics, like average depth of target (aDOT), yards per route run, and yards per catch, are discrete, outcome-based numbers rather than continuous descriptions of route running. They're useful for capturing raw production, but they're all bound by target share, dependent on how the play actually resolves, and blind to what's happening on the field between the snap and the catch. None of them isolate a receiver's route-running skill from the offense's play-calling or the quarterback's decision-making. That gap is what our framework is built to close.
 
@@ -190,6 +191,36 @@ From this continuous array of frame-level threat generation, the model extracts 
 
 - **Average Route Threat Efficiency (aRTE)**: Calculated as the mean Frame DVS across all analyzed pre-pass frames. This metric quantifies a receiver’s baseline ability to sustain high-value spatial control throughout the entire duration of a route's development.  
 - **Maximum Route Threat Efficiency (mRTE)**: Isolated as the peak (maximum) Frame DVS achieved at any point during the pre-pass lifecycle. This captures a receiver's peak window-creation ability, measuring their capacity to generate explosive threat at the optimal timing of a play
+- **Final Route Threat Efficiency (fRTE)**: Computed as the Frame DVS at the time of throw. This reflects a receiver's route-finishing capability, evaluating how much spatial control and drive-value potential they maintain at the exact window of opportunity.
+
+# 5 Metric Validation
+
+To evaluate the empirical validity and practical utility of our Route Threat Efficiency metrics, we analyze continuous tracking data across the top 20 wide receivers from the 2023 NFL season (sorted by receiving yards) alongside both their 2023 and 2024 opportunity and production metrics. We evaluate how Average Route Threat Efficiency ($aRTE$), Maximum Route Threat Efficiency ($mRTE$), and Final Route Threat Efficiency ($fRTE$) capture distinct receiver capabilities, handle depth-versus-separation trade-offs, and predict future downfield threat.
+
+![2023 RTE and Opportunity](~/Documents/Football_R/CMSAC--Field Value/Analysis/receiver_RTE_table_2023.png){#fig-rte2023 width=40%}
+
+## 5.1 Co-Linearity and Archetypal Divergence
+
+Across the general population of wide receivers, $mRTE$ and $aRTE$ exhibit strong co-linearity. Receivers who build high peak threat windows typically sustain elevated spatial control across the entire pre-pass window. Consequently, distinguishing receiver archetypes purely through metric divergence presents a structural challenge for most route profiles.
+
+However, systematic divergence emerges among explosive, deep-threat receiver archetypes. Receivers characterized by their ability to be a deep threat, such as George Pickens ($aRTE$ of 54.6 vs. $mRTE$ of 41.2) and DK Metcalf ($aRTE$ of 78.1 vs. $mRTE$ of 59.5), consistently yield an $aRTE$ that outpaces their $mRTE$. Because these receivers leverage their speed to create and maintain control over high-value space downfield on deep go routes, their continuous threat accumulation remains elevated over time.
+
+We also see some archetypal divergence in route runners who generate their production on short and intermediate-area timing routes. These receivers see a higher $mrte$ than $aRTE$ as an artifact of generating high-value space for a short period of time before the pass coverage collapses on their route. Their production relies on accurate pass placement and timing, since these short pass windows are only open for a split-second. Some headliners of this group include Amon-Ra St. Brown (38.5 $mRTE$ vs 32.5 $aRTE$) and Keenan Allen (10.0 $mRTE$ vs 4.3 $aRTE$), both of whom are known for their short-area route running and ability to create separation.
+
+## 5.2 Depth vs. Separation Dynamics
+
+By weighting pitch control through spatial expected points ($xEPA$), the DVS model inherently assigns higher threat values to deeper field locations. To try to avoid over-fitting for pass depth instead of separation, we implemented some $xEPA$ dampeners on the DVS computation ($\sqrt{\vert{}xEPA\vert{}}$). While this addressed some of the over-emphasis, it did not perfectly balance pass depth and separation. A more finely tuned DVS function would be able to address this limitation. Despite this structural emphasis on field depth, final frame efficiency ($fRTE$) successfully differentiates elite separators from contested jump-ball receivers.
+
+As demonstrated in figure 1, elite short-to-intermediate separators achieve higher $fRTE$ scores than deep contested-catch specialists, even when operating at significantly lower air yards per route (Air YPR). In 2023, Amon-Ra St. Brown posted an $fRTE$ of 43.6 with an Air YPR of 7.1, outpacing deep-ball threat George Pickens ($fRTE$ of 40.2, Air YPR of 11.9). This demonstrates that $fRTE$ does not merely reward downfield depth, but strictly measures a receiver's ability to maximize spatial leverage relative to defender positioning at the instant of the throw. Across all evaluated metrics, $fRTE$ proves to be the most stable indicator of true downfield threat. 
+
+![2023 RTE and 2024 Opportunity](~/Documents/Football_R/CMSAC--Field Value/Analysis/receiver_RTE_table_2024.png){#fig-rte2024 width=40%}
+
+## 5.3 Year-Over-Year Stability and Predictive Scope
+
+Evaluating 2023 RTE metrics against 2024 player performance (@fig-rte2024) demonstrates that $fRTE$ serves as a strong predictor of future downfield threat efficiency rather than raw target volume. Because target volume remains bound to team-level play calling, quarterback preference, and offensive line protection, $fRTE$ does not aim to forecast gross target totals. Instead, it predicts a receiver's underlying efficiency profile, such as Air Yards per Reception (YPR), Catch Percentage, and Target Rate, when deployed in a consistent scheme. Barring major schematic changes (e.g. DJ Moore going from CAR to CHI), we see that prior year $fRTE$ generally aligns with the next year's efficiency metrics. 
+
+
+
 
 # References
 
@@ -202,6 +233,8 @@ Carter, V., & Machol, R. E. (1971). Technical note—Operations research on foot
 Fernández, J., & Bornn, L. (2018). Wide open spaces: A statistical technique for measuring space creation in professional soccer. Proceedings of the 12th MIT Sloan Sports Analytics Conference.
 
 Inayatali, H., White, A., & Hocevar, D. (2023). Between the lines: How do we measure pressure? [Notebook]. Kaggle, NFL Big Data Bowl 2023. https://www.kaggle.com/code/hassaaninayatali/between-the-lines-how-do-we-measure-pressure
+
+NFL Next Gen Stats. (n.d.). Glossary. National Football League. https://nextgenstats.nfl.com/glossary
 
 Spearman, W. (2018). Beyond expected goals. Proceedings of the 12th MIT Sloan Sports Analytics Conference, 1–17.
 
