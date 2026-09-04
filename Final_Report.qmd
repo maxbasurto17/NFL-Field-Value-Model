@@ -90,7 +90,7 @@ $$TTI = \frac{-v_0 + \sqrt{v_0^2 + 2a_{max}d}}{a_{max}}$$
 If the player reaches maximum velocity before arriving at the target, then the remainder of the distance is traversed at constant speed:
 $$TTI = t_{acc} + \frac{d - d_{acc}}{v_{max}}$$
 
-Ball flight times are determined by calculating the distance to the target and bounding the 2D velocity of the football ($v_{ball}$) between 14 yds/sec (lob passes) and 23 yds/sec (bullet passes), reflecting empirical 5th and 95th percentile NFL throw speeds. In multi-receiver computations, the ball arrival time is calibrated to the receiver who arrives first, assuming optimal quarterback execution.
+Ball flight times are determined by calculating the distance to the target and bounding the 2D velocity of the football ($v_{ball}$) between 14 yds/sec (lob passes) and 23 yds/sec (bullet passes), reflecting empirical 5th and 95th percentile NFL throw speeds. 2D velocity is captured because the data is limited to x and y coordinates; it is not feasible to measure the arc of the ball without a vertical z coordinate. In multi-receiver computations, the ball arrival time is calibrated to the receiver who arrives first, assuming optimal quarterback execution.
 
 ### Spatial Control and Arrival Probability
 
