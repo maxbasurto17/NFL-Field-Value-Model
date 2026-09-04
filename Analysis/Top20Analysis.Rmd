@@ -87,13 +87,22 @@ VIZUAL: mRTE and aRTE are effective in measuring a combination of downfield thre
 library(gt)
 library(dplyr)
 
-# 1. Prepare data: Scale mRTE and aRTE to (0, 99) and select specified columns
+# 1. Define 2023 Min/Max scaling bounds
+mRTE_min <- min(t20_season_RTE_2023$mRTE, na.rm = TRUE)
+mRTE_max <- max(t20_season_RTE_2023$mRTE, na.rm = TRUE)
+
+aRTE_min <- min(t20_season_RTE_2023$aRTE, na.rm = TRUE)
+aRTE_max <- max(t20_season_RTE_2023$aRTE, na.rm = TRUE)
+
+eff_min  <- min(t20_season_RTE_2023$avg_final_eff, na.rm = TRUE)
+eff_max  <- max(t20_season_RTE_2023$avg_final_eff, na.rm = TRUE)
+
+# 2. Prepare 2023 data using the 2023 bounds
 gt_prep <- t20_season_RTE_2023 %>%
   mutate(
-    # Min-max scaling mapped to [0, 99]
-    mRTE_scaled = (mRTE - min(mRTE, na.rm = TRUE)) / (max(mRTE, na.rm = TRUE) - min(mRTE, na.rm = TRUE)) * 99,
-    aRTE_scaled = (aRTE - min(aRTE, na.rm = TRUE)) / (max(aRTE, na.rm = TRUE) - min(aRTE, na.rm = TRUE)) * 99,
-    avg_final_eff_scaled = (avg_final_eff - min(avg_final_eff, na.rm = TRUE)) / (max(avg_final_eff, na.rm = TRUE) - min(avg_final_eff, na.rm = TRUE)) * 99,
+    mRTE_scaled          = (mRTE - mRTE_min) / (mRTE_max - mRTE_min) * 99,
+    aRTE_scaled          = (aRTE - aRTE_min) / (aRTE_max - aRTE_min) * 99,
+    avg_final_eff_scaled = (avg_final_eff - eff_min) / (eff_max - eff_min) * 99
   ) %>%
   select(
     player_name,
@@ -108,57 +117,37 @@ gt_prep <- t20_season_RTE_2023 %>%
     target_rate
   )
 
-# 2. Construct the GT Table
+# 3. Construct 2023 GT Table
 gt_table <- gt_prep %>%
   gt() %>%
-  # Table Titles
   tab_header(
     title = md("**2023 Wide Receiver RTE & Opportunity Metrics**"),
     subtitle = md("mRTE and aRTE relative scale (0–99) | Top 20 WRs by Rec Yards")
   ) %>%
-  # Column Labels
   cols_label(
     player_name = "Player",
     recent_team = "Team",
     mRTE = "mRTE",
     aRTE = "aRTE",
-    avg_final_eff = "RTE at Throw",
+    avg_final_eff = "fRTE",
     targets = "Targets",
     air_yds = "Air Yards",
     air_ypr = "Air YPR",
     comp_pct = "Catch %",
     target_rate = "Target Rate"
   ) %>%
-  # Formatting Percentages
-  fmt_percent(
-    columns = c(comp_pct, target_rate),
-    decimals = 1
-  ) %>%
-  # Formatting Decimals
-  fmt_number(
-    columns = c(mRTE, aRTE, avg_final_eff, air_ypr),
-    decimals = 1
-  ) %>%
-  # Formatting Integers
-  fmt_number(
-    columns = c(targets, air_yds),
-    decimals = 0
-  ) %>%
-  # Red (low) to Green (high) Color Gradient
+  fmt_percent(columns = c(comp_pct, target_rate), decimals = 1) %>%
+  fmt_number(columns = c(mRTE, aRTE, avg_final_eff, air_ypr), decimals = 1) %>%
+  fmt_number(columns = c(targets, air_yds), decimals = 0) %>%
   data_color(
     columns = c(mRTE, aRTE, avg_final_eff),
-    palette = c("#D73027", "#FFFFBF", "#1A9850") # Soft Red -> Yellow -> Green
+    palette = c("#D73027", "#FFFFBF", "#1A9850")
   ) %>%
-  # Alignment
-  cols_align(
-    align = "left",
-    columns = c(player_name, recent_team)
-  ) %>%
+  cols_align(align = "left", columns = c(player_name, recent_team)) %>%
   cols_align(
     align = "center",
     columns = c(mRTE, aRTE, avg_final_eff, targets, air_yds, air_ypr, comp_pct, target_rate)
   ) %>%
-  # Table Styling Options
   opt_row_striping() %>%
   tab_options(
     table.font.size = px(13),
@@ -166,7 +155,6 @@ gt_table <- gt_prep %>%
     column_labels.font.weight = "bold"
   )
 
-# Display table
 gtsave(gt_table, filename = "receiver_RTE_table_2023.png")
 gt_table
 ```
@@ -242,13 +230,13 @@ t20_season_RTE_2024 <- all_plays %>%
 
 Forward-looking gt table using RTE as a predictor for future success
 ```{r}
-# 1. Prepare data: Scale mRTE and aRTE to (0, 99) and select specified columns
-gt_prep <- t20_season_RTE_2024 %>%
+# 1. Prepare 2024 data scaled against 2023 reference values
+gt_prep_2024 <- t20_season_RTE_2024 %>%
   mutate(
-    # Min-max scaling mapped to [0, 99]
-    mRTE_scaled = (mRTE - min(mRTE, na.rm = TRUE)) / (max(mRTE, na.rm = TRUE) - min(mRTE, na.rm = TRUE)) * 99,
-    aRTE_scaled = (aRTE - min(aRTE, na.rm = TRUE)) / (max(aRTE, na.rm = TRUE) - min(aRTE, na.rm = TRUE)) * 99,
-    avg_final_eff_scaled = (avg_final_eff - min(avg_final_eff, na.rm = TRUE)) / (max(avg_final_eff, na.rm = TRUE) - min(avg_final_eff, na.rm = TRUE)) * 99,
+    # Min-max scaling anchored to 2023 population bounds
+    mRTE_scaled          = (mRTE - mRTE_min) / (mRTE_max - mRTE_min) * 99,
+    aRTE_scaled          = (aRTE - aRTE_min) / (aRTE_max - aRTE_min) * 99,
+    avg_final_eff_scaled = (avg_final_eff - eff_min) / (eff_max - eff_min) * 99
   ) %>%
   select(
     player_name,
@@ -263,57 +251,37 @@ gt_prep <- t20_season_RTE_2024 %>%
     target_rate
   )
 
-# 2. Construct the GT Table
-gt_table <- gt_prep %>%
+# 2. Construct the 2024 GT Table
+gt_table_2024 <- gt_prep_2024 %>%
   gt() %>%
-  # Table Titles
   tab_header(
     title = md("**2023 Wide Receiver RTE & 2024 Opportunity Metrics**"),
-    subtitle = md("mRTE and aRTE relative scale (0–99) | 2023 Top 20 WRs, min 100 targets in 2024")
+    subtitle = md("mRTE and aRTE relative scale (0–99 anchored to 2023) | 2023 Top 20 WRs, min 100 targets in 2024")
   ) %>%
-  # Column Labels
   cols_label(
     player_name = "Player",
     recent_team = "Team",
     mRTE = "mRTE",
     aRTE = "aRTE",
-    avg_final_eff = "RTE at Throw",
+    avg_final_eff = "fRTE",
     targets = "Targets",
     air_yds = "Air Yards",
     air_ypr = "Air YPR",
     comp_pct = "Catch %",
     target_rate = "Target Rate"
   ) %>%
-  # Formatting Percentages
-  fmt_percent(
-    columns = c(comp_pct, target_rate),
-    decimals = 1
-  ) %>%
-  # Formatting Decimals
-  fmt_number(
-    columns = c(mRTE, aRTE, avg_final_eff, air_ypr),
-    decimals = 1
-  ) %>%
-  # Formatting Integers
-  fmt_number(
-    columns = c(targets, air_yds),
-    decimals = 0
-  ) %>%
-  # Red (low) to Green (high) Color Gradient
+  fmt_percent(columns = c(comp_pct, target_rate), decimals = 1) %>%
+  fmt_number(columns = c(mRTE, aRTE, avg_final_eff, air_ypr), decimals = 1) %>%
+  fmt_number(columns = c(targets, air_yds), decimals = 0) %>%
   data_color(
     columns = c(mRTE, aRTE, avg_final_eff),
-    palette = c("#D73027", "#FFFFBF", "#1A9850") # Soft Red -> Yellow -> Green
+    palette = c("#D73027", "#FFFFBF", "#1A9850")
   ) %>%
-  # Alignment
-  cols_align(
-    align = "left",
-    columns = c(player_name, recent_team)
-  ) %>%
+  cols_align(align = "left", columns = c(player_name, recent_team)) %>%
   cols_align(
     align = "center",
     columns = c(mRTE, aRTE, avg_final_eff, targets, air_yds, air_ypr, comp_pct, target_rate)
   ) %>%
-  # Table Styling Options
   opt_row_striping() %>%
   tab_options(
     table.font.size = px(13),
@@ -321,7 +289,6 @@ gt_table <- gt_prep %>%
     column_labels.font.weight = "bold"
   )
 
-# Display table
-gtsave(gt_table, filename = "receiver_RTE_table_2024.png")
-gt_table
+gtsave(gt_table_2024, filename = "receiver_RTE_table_2024.png")
+gt_table_2024
 ```
