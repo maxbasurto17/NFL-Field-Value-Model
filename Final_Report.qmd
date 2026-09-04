@@ -206,6 +206,36 @@ As demonstrated in Figure 5, elite short-to-intermediate separators achieve high
 
 Evaluating 2023 RTE metrics against 2024 player performance (Figure 6) demonstrates that $fRTE$ serves as a strong predictor of future downfield threat efficiency rather than raw target volume. Because target volume remains bound to team-level play calling, quarterback preference, and offensive line protection, $fRTE$ does not aim to forecast gross target totals. Instead, it predicts a receiver's underlying efficiency profile, such as Air Yards per Reception (YPR), Catch Percentage, and Target Rate, when deployed in a consistent scheme. Barring major schematic changes (e.g. DJ Moore going from CAR to CHI), we see that prior year $fRTE$ generally aligns with the next year's efficiency metrics. 
 
+# 5 NFL Applications
+
+Football front offices and coaching staffs have several avenues for using DVS and RTE in roster construction, team dynamics, and game planning. 
+
+## 5.1 Front Office & Roster Construction
+
+- **Player Evaluation & Valuation**: By isolating continuous spatial control, the DVS framework allows front offices to evaluate players independently of quarterback quality or offensive scheme. It eliminates target bias by rewarding receivers strictly for establishing high-value leverage, helping teams uncover market inefficiencies and accurately project draft prospects without relying on noisy, context-dependent production metrics. 
+
+- **Archetype Profiling**: Teams can pair complementary skill sets by identifying deep field-stretchers who maintain continuous spatial value ($aRTE > mRTE$) versus precision route-runners who win during tight, explosive timing windows ($mRTE > aRTE$).
+
+## 5.2 Coaching Staff & Tactical Game Planning
+
+- **Route Concept Optimization**: Coaches can assess which route concepts maximize spatial threat against specific coverages by evaluating frame-by-frame $DVS$ tracking. This allows offensive coordinators to measure how different route combinations manipulate specific defensive shells. By quantifying these interactions, play-callers can engineer concepts that maximize the total spatial value created across the field. 
+- **Pass Timing**: Coaches can synchronize quarterback dropbacks with a receiver’s exact peak window-creation time, which is measured by their $mRTE$. By pinpointing the specific frame, a receiver establishes maximum spatial leverage, and the coaching staff can tune the quarterback's progression reads to match this timing. This ensures the ball is delivered at the precise moment the downfield threat is most potent.
+- **Defensive Leverage**: Defensive coordinators can invert the framework to identify secondary weaknesses, allowing for targeted bracket coverage against receivers who generate high spatial leverage at the moment of the throw ($fRTE$).
+
+# 6 Discussion & Limitations
+
+## 6.1 Analytical Contributions
+
+This research advances football analytics by synthesizing kinematic pitch control with localized expected drive value ($xEPA$). The DVS framework introduces a non-linear threat transformation that aggressively penalizes contested space, restricts spatial evaluation to physically viable "Reasonable Pass Bounds," and establishes target-independent metrics to accurately project future downfield efficiency.
+
+## 6.2 Limitations & Future Research
+
+- **Depth vs. Separation**: Because deeper routes naturally retain a mathematical advantage, future iterations should incorporate more aggressive adaptive depth normalization to better balance short-area separators against vertical threats.
+- **Multi-Receiver Dynamics**: The current model evaluates isolated WR-DB interactions. Expanding to a multi-agent model would help quantify a receiver's "distraction value" in clearing out coverage for teammates.
+- **3D Kinematics**: Lacking $z$-axis data limits the evaluation of ball height and player elevation. Incorporating vertical tracking will refine time-to-intercept models for high-point and contested catches.
+
+Ultimately, the Dangerous Viable Space framework redefines how wide receiver performance is measured by decoupling individual route-running execution from team-level outcomes. By continuously tracking spatial threat generation rather than relying on static, target-dependent results, the derived RTE metrics provide a more objective and robust foundation for both roster construction and tactical game planning in the modern NFL.
+
 {{< pagebreak >}}
 
 # References
